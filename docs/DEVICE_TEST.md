@@ -1,6 +1,6 @@
 # Device test — Android 16 / 6.12.23 / 4 KiB pages
 
-Artifact: `build/KPMDynaLab-0.3.0-test.kpm`
+Artifact: `build/KPMDynaLab-0.3.1-test.kpm`
 
 ## Implemented in this test build
 
@@ -18,7 +18,7 @@ Not yet implemented: process lineage, exec/file-drop tracing, procfs UI, passwor
 Runtime load from shell (syntax depends on your KernelPatch frontend):
 
 ```sh
-kpatch kpm load /data/local/tmp/KPMDynaLab-0.3.0-test.kpm
+kpatch kpm load /data/local/tmp/KPMDynaLab-0.3.1-test.kpm
 ```
 
 Or select the file in APatch/FolkPatch/KPatch-Next.

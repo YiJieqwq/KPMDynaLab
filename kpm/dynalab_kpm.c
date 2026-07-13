@@ -42,11 +42,13 @@ typedef struct dl_hook_fargs4 hook_fargs4_t;
 
 extern int hook_wrap(void *func, int argc, void *before, void *after, void *udata);
 extern void unhook(void *func);
-/* KernelPatch exports a function-pointer variable with this ELF symbol name. */
+/* KernelPatch exports function-pointer variables with these ELF symbol names. */
 extern unsigned long (*kp_lookup_name)(const char *name) __asm__("kallsyms_lookup_name");
+extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
+#define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.3.0-test");
+KPM_VERSION("0.3.1-test");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("Linuxnhe Developers");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
@@ -57,6 +59,7 @@ enum dl_state { DL_READY = 1, DL_CONFIGURED = 2, DL_SEALED = 3 };
 static int profile = DL_AUTO;
 static int state = DL_READY;
 static void *sym_write_iter, *sym_ioctl, *sym_fallocate, *sym_reboot;
+static void (*fn_iov_iter_advance)(struct iov_iter *i, size_t bytes);
 
 static int streq(const char *a, const char *b)
 {
@@ -93,13 +96,13 @@ static void before_blkdev_write_iter(hook_fargs2_t *args, void *udata)
         iocb->ki_filp->f_mapping->host)
         dev = iocb->ki_filp->f_mapping->host->i_rdev;
 
-    pr_info("[dynalab] BLOCK_WRITE pid=%d dev=%u:%u off=%lld len=%zu profile=%s action=%s\n",
+    dl_log("BLOCK_WRITE pid=%d dev=%u:%u off=%lld len=%zu profile=%s action=%s\n",
             current->pid, MAJOR(dev), MINOR(dev), pos, count, profile_name(),
             simulate_dangerous() ? "SIMULATE" : "PASS");
 
     if (!simulate_dangerous()) return;
 
-    iov_iter_advance(from, count);
+    fn_iov_iter_advance(from, count);
     iocb->ki_pos += count;
     args->skip_origin = 1;
     args->ret = count;
@@ -120,7 +123,7 @@ static void before_blkdev_ioctl(hook_fargs3_t *args, void *udata)
     if (file && file->f_mapping && file->f_mapping->host)
         dev = file->f_mapping->host->i_rdev;
 
-    pr_info("[dynalab] BLOCK_IOCTL pid=%d dev=%u:%u cmd=0x%x profile=%s action=%s\n",
+    dl_log("BLOCK_IOCTL pid=%d dev=%u:%u cmd=0x%x profile=%s action=%s\n",
             current->pid, MAJOR(dev), MINOR(dev), cmd, profile_name(),
             simulate_dangerous() ? "SIMULATE" : "PASS");
 
@@ -141,7 +144,7 @@ static void before_blkdev_fallocate(hook_fargs4_t *args, void *udata)
     if (file && file->f_mapping && file->f_mapping->host)
         dev = file->f_mapping->host->i_rdev;
 
-    pr_info("[dynalab] BLOCK_FALLOCATE pid=%d dev=%u:%u mode=0x%x off=%lld len=%lld profile=%s action=%s\n",
+    dl_log("BLOCK_FALLOCATE pid=%d dev=%u:%u mode=0x%x off=%lld len=%lld profile=%s action=%s\n",
             current->pid, MAJOR(dev), MINOR(dev), mode, start, len,
             profile_name(), simulate_dangerous() ? "SIMULATE" : "PASS");
 
@@ -154,7 +157,7 @@ static void before_blkdev_fallocate(hook_fargs4_t *args, void *udata)
 /* __arm64_sys_reboot receives pt_regs; for the first test we only suppress it. */
 static void before_reboot(hook_fargs1_t *args, void *udata)
 {
-    pr_info("[dynalab] REBOOT pid=%d profile=%s action=%s\n",
+    dl_log("REBOOT pid=%d profile=%s action=%s\n",
             current->pid, profile_name(), simulate_dangerous() ? "SUPPRESS" : "PASS");
     if (simulate_dangerous()) {
         args->skip_origin = 1;
@@ -167,12 +170,12 @@ static int install_one(const char *name, int argc, void *before, void **saved)
     void *addr = (void *)kp_lookup_name(name);
     int err;
     if (!addr) {
-        pr_err("[dynalab] symbol not found: %s\n", name);
+        dl_log("ERROR: symbol not found: %s\n", name);
         return -2;
     }
     err = hook_wrap(addr, argc, before, NULL, NULL);
     if (err) {
-        pr_err("[dynalab] hook failed: %s err=%d\n", name, err);
+        dl_log("ERROR: hook failed: %s err=%d\n", name, err);
         return -(int)err;
     }
     *saved = addr;
@@ -184,7 +187,13 @@ static long dynalab_init(const char *args, const char *event, void *__user reser
     int rc;
     profile = DL_AUTO;
     state = DL_READY;
-    pr_info("[dynalab] init event=%s default=AUTO state=READY\n", event ? event : "?");
+    dl_log("init event=%s default=AUTO state=READY\n", event ? event : "?");
+
+    fn_iov_iter_advance = (void *)kp_lookup_name("iov_iter_advance");
+    if (!fn_iov_iter_advance) {
+        dl_log("ERROR: symbol not found: iov_iter_advance\n");
+        return -2;
+    }
 
     rc = install_one("blkdev_write_iter", 2, before_blkdev_write_iter, &sym_write_iter);
     if (rc) goto fail;
@@ -195,7 +204,7 @@ static long dynalab_init(const char *args, const char *event, void *__user reser
     rc = install_one("__arm64_sys_reboot", 1, before_reboot, &sym_reboot);
     if (rc) goto fail;
 
-    pr_info("[dynalab] loaded: ctl0 TRACE|AUTO|EXPERT, then SEAL\n");
+    dl_log("loaded: ctl0 TRACE|AUTO|EXPERT, then SEAL\n");
     return 0;
 fail:
     if (sym_reboot) unhook(sym_reboot);
@@ -213,7 +222,7 @@ static long dynalab_ctl0(const char *args, char __user *out_msg, int outlen)
     if (streq(args, "RESET")) {
         state = DL_READY;
         profile = DL_AUTO;
-        pr_info("[dynalab] manager reset -> READY/AUTO\n");
+        dl_log("manager reset -> READY/AUTO\n");
         return 0;
     }
     if (state == DL_SEALED) return -1;
@@ -224,12 +233,12 @@ static long dynalab_ctl0(const char *args, char __user *out_msg, int outlen)
     else if (streq(args, "SEAL")) {
         if (state != DL_CONFIGURED) return -22;
         state = DL_SEALED;
-        pr_info("[dynalab] SEALED profile=%s\n", profile_name());
+        dl_log("SEALED profile=%s\n", profile_name());
         return 0;
     } else return -22;
 
     state = DL_CONFIGURED;
-    pr_info("[dynalab] configured profile=%s\n", profile_name());
+    dl_log("configured profile=%s\n", profile_name());
     return 0;
 }
 
@@ -239,7 +248,7 @@ static long dynalab_exit(void *__user reserved)
     if (sym_fallocate) unhook(sym_fallocate);
     if (sym_ioctl) unhook(sym_ioctl);
     if (sym_write_iter) unhook(sym_write_iter);
-    pr_info("[dynalab] unloaded\n");
+    dl_log("unloaded\n");
     return 0;
 }
 

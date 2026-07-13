@@ -27,7 +27,7 @@ KPMDynaLab hooks at the **block layer** — 4 layers below libc — where no use
 app → libc → syscall → VFS → blkdev_open ← KPMDynaLab inline hook
 ```
 
-## Device Test Build (v0.3.0-test)
+## Device Test Build (v0.3.1-test)
 
 A first hot-loadable KPM adapter is available for **Android 16 / Linux 6.12.23 / 4 KiB pages**. It hooks `blkdev_write_iter`, `blkdev_ioctl`, `blkdev_fallocate`, and `__arm64_sys_reboot`. AUTO simulates dangerous block operations; TRACE passes them through; READY fails safe to simulation.
 
