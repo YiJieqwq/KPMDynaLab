@@ -27,9 +27,21 @@ KPMDynaLab hooks at the **block layer** — 4 layers below libc — where no use
 app → libc → syscall → VFS → blkdev_open ← KPMDynaLab inline hook
 ```
 
+## Device Test Build (v0.3.0-test)
+
+A first hot-loadable KPM adapter is available for **Android 16 / Linux 6.12.23 / 4 KiB pages**. It hooks `blkdev_write_iter`, `blkdev_ioctl`, `blkdev_fallocate`, and `__arm64_sys_reboot`. AUTO simulates dangerous block operations; TRACE passes them through; READY fails safe to simulation.
+
+Build:
+
+```bash
+make kpm KDIR=/path/to/prepared/android16-6.12
+```
+
+Follow [the device test guide](docs/DEVICE_TEST.md). Start with the loop-backed smoke test, not a real partition.
+
 ## Development Status
 
-> **v0.2 policy prototype:** TRACE/AUTO/EXPERT, SEALED state transitions, fail-closed behavior, dangerous-storage simulation, reboot suppression, and expert breakpoint rules are implemented in the portable policy core and covered by tests. The target-specific KPM adapter remains build-gated until matching device kernel headers are supplied; kernel ABI layouts are not guessed.
+> **v0.3 device-test build:** the portable TRACE/AUTO/EXPERT policy core is covered by tests, and a minimal Android 16/6.12.23 KPM adapter now provides global block-write/ioctl/fallocate simulation plus reboot suppression. Process lineage, file-drop tracing, password login, shadow readback, and interactive expert breakpoints remain future work.
 
 ```bash
 make test

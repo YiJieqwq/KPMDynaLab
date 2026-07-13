@@ -26,18 +26,36 @@ $(POLICY_TEST): src/policy.c tests/policy_test.c include/dl_policy.h | $(BUILD)
 test: $(POLICY_TEST)
 	./$(POLICY_TEST)
 
-# The KPM adapter dereferences version-dependent block-layer structures.
-# Refuse to build it without the target's matching kernel headers.
-kpm:
-	@if [ ! -d "$(KP_DIR)/kernel" ]; then \
-		echo "error: KP_DIR must point to KernelPatch SDK"; exit 1; \
+# Build the device-test KPM against Android 16 / Linux 6.12 headers.
+KPM_SRC := kpm/dynalab_kpm.c
+KPM_OBJ := $(BUILD)/dynalab_kpm.o
+KPM_OUT := $(BUILD)/KPMDynaLab-0.3.0-test.kpm
+KPM_INCLUDES := \
+	-I$(KDIR)/arch/arm64/include \
+	-I$(KDIR)/arch/arm64/include/generated \
+	-I$(KDIR)/include \
+	-I$(KDIR)/arch/arm64/include/uapi \
+	-I$(KDIR)/arch/arm64/include/generated/uapi \
+	-I$(KDIR)/include/uapi \
+	-I$(KDIR)/include/generated/uapi
+KPM_CFLAGS := -D__KERNEL__ -DMODULE '-DKBUILD_MODNAME="KPMDynaLab"' \
+	-O2 -fno-pic -fno-stack-protector -mgeneral-regs-only \
+	-Wno-address-of-packed-member $(KPM_INCLUDES) \
+	-include $(KDIR)/include/linux/compiler-version.h \
+	-include $(KDIR)/include/linux/kconfig.h
+
+kpm: $(KPM_OUT)
+	@file $(KPM_OUT)
+	@echo "Built: $(KPM_OUT)"
+
+$(KPM_OBJ): $(KPM_SRC) | $(BUILD)
+	@if [ -z "$(KDIR)" ] || [ ! -f "$(KDIR)/include/generated/autoconf.h" ]; then \
+		echo "error: prepare KDIR first: make ARCH=arm64 gki_defconfig prepare"; exit 1; \
 	fi
-	@if [ -z "$(KDIR)" ] || [ ! -d "$(KDIR)" ]; then \
-		echo "error: KDIR must point to matching target kernel source/headers"; exit 1; \
-	fi
-	@echo "KPM adapter build is gated until the target ABI adapter is selected."
-	@echo "Run make test for the v0.2 policy prototype."
-	@exit 2
+	$(CC) $(KPM_CFLAGS) -c $< -o $@
+
+$(KPM_OUT): $(KPM_OBJ)
+	$(CC) -r -o $@ $<
 
 clean:
 	rm -rf $(BUILD)
