@@ -1,0 +1,6 @@
+*.o
+*.ko
+*.kpm
+*.swp
+*~
+build/
