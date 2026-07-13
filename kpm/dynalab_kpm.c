@@ -42,13 +42,14 @@ typedef struct dl_hook_fargs4 hook_fargs4_t;
 
 extern int hook_wrap(void *func, int argc, void *before, void *after, void *udata);
 extern void unhook(void *func);
+extern int compat_copy_to_user(void __user *to, const void *from, int n);
 /* KernelPatch exports function-pointer variables with these ELF symbol names. */
 extern unsigned long (*kp_lookup_name)(const char *name) __asm__("kallsyms_lookup_name");
 extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
 #define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.3.2-test");
+KPM_VERSION("0.3.3-test");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("Linuxnhe Developers");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
@@ -73,12 +74,27 @@ static const char *profile_name(void)
     return profile == DL_TRACE ? "TRACE" : profile == DL_AUTO ? "AUTO" : "EXPERT";
 }
 
+static int str_len(const char *s)
+{
+    int n = 0;
+    while (s && s[n]) n++;
+    return n;
+}
+
+static long ctl_reply(char __user *out_msg, int outlen, const char *msg)
+{
+    int len = str_len(msg) + 1;
+    if (!out_msg || outlen <= 0)
+        return 0;
+    if (len > outlen)
+        len = outlen;
+    return compat_copy_to_user(out_msg, msg, len) > 0 ? 0 : -14;
+}
+
 static int simulate_dangerous(void)
 {
-    /* Fail safe: only explicitly sealed TRACE may perform real writes. */
-    if (state != DL_SEALED)
-        return 1;
-    return profile != DL_TRACE;
+    /* Analysis policy becomes active only after the manager seals it. */
+    return state == DL_SEALED && profile != DL_TRACE;
 }
 
 static void before_blkdev_write_iter(hook_fargs2_t *args, void *udata)
@@ -217,29 +233,58 @@ fail:
 
 static long dynalab_ctl0(const char *args, char __user *out_msg, int outlen)
 {
-    if (!args) return -22;
+    if (!args)
+        return -22;
+
+    if (streq(args, "STATUS")) {
+        if (state == DL_READY)
+            return ctl_reply(out_msg, outlen, "state=READY profile=AUTO interception=OFF");
+        if (state == DL_CONFIGURED)
+            return ctl_reply(out_msg, outlen,
+                profile == DL_TRACE ? "state=CONFIGURED profile=TRACE interception=OFF" :
+                profile == DL_AUTO ? "state=CONFIGURED profile=AUTO interception=OFF" :
+                                     "state=CONFIGURED profile=EXPERT interception=OFF");
+        return ctl_reply(out_msg, outlen,
+            profile == DL_TRACE ? "state=SEALED profile=TRACE interception=PASS" :
+            profile == DL_AUTO ? "state=SEALED profile=AUTO interception=SIMULATE" :
+                                 "state=SEALED profile=EXPERT interception=SIMULATE");
+    }
 
     if (streq(args, "RESET")) {
         state = DL_READY;
         profile = DL_AUTO;
-        dl_log("manager reset -> READY/AUTO\n");
-        return 0;
+        dl_log("manager reset -> READY/AUTO interception=OFF\n");
+        return ctl_reply(out_msg, outlen, "OK RESET state=READY interception=OFF");
     }
-    if (state == DL_SEALED) return -1;
 
-    if (streq(args, "TRACE")) profile = DL_TRACE;
-    else if (streq(args, "AUTO")) profile = DL_AUTO;
-    else if (streq(args, "EXPERT")) profile = DL_EXPERT;
+    if (state == DL_SEALED)
+        return -1;
+
+    if (streq(args, "TRACE"))
+        profile = DL_TRACE;
+    else if (streq(args, "AUTO"))
+        profile = DL_AUTO;
+    else if (streq(args, "EXPERT"))
+        profile = DL_EXPERT;
     else if (streq(args, "SEAL")) {
-        if (state != DL_CONFIGURED) return -22;
+        if (state != DL_CONFIGURED)
+            return -22;
         state = DL_SEALED;
         dl_log("SEALED profile=%s\n", profile_name());
-        return 0;
-    } else return -22;
+        return ctl_reply(out_msg, outlen,
+            profile == DL_TRACE ? "OK SEALED TRACE: pass-through enabled" :
+            profile == DL_AUTO ? "OK SEALED AUTO: dangerous operations simulated" :
+                                 "OK SEALED EXPERT: AUTO-safe fallback");
+    } else {
+        return -22;
+    }
 
     state = DL_CONFIGURED;
-    dl_log("configured profile=%s\n", profile_name());
-    return 0;
+    dl_log("configured profile=%s interception=OFF until SEAL\n", profile_name());
+    return ctl_reply(out_msg, outlen,
+        profile == DL_TRACE ? "OK CONFIGURED TRACE; send SEAL to activate" :
+        profile == DL_AUTO ? "OK CONFIGURED AUTO; send SEAL to activate" :
+                             "OK CONFIGURED EXPERT; send SEAL to activate");
 }
 
 static long dynalab_exit(void *__user reserved)
