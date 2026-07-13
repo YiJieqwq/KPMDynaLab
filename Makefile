@@ -1,35 +1,45 @@
-# KPMDynaLab Makefile
-# ====================
-# 依赖: KernelPatch SDK (bmax121/KernelPatch)
-# 编译: make KDIR=/path/to/kernel
-#
-# 输出: build/kpm_dynalab.kpm
+# KPMDynaLab build
+# =================
+# Portable policy tests: make test
+# KPM (requires KernelPatch SDK + matching kernel headers): make kpm
 
-KPM_NAME := kpm_dynalab
+HOST_CC ?= cc
+TARGET_COMPILE ?= aarch64-linux-gnu-
+CC := $(TARGET_COMPILE)gcc
+KP_DIR ?= $(HOME)/KernelPatch
+KDIR ?=
 
-# KernelPatch SDK 路径 (需修改)
-KP_SDK  ?= $(HOME)/KernelPatch
-KERNEL_SRC ?= $(HOME)/android-kernel
+BUILD := build
+POLICY_TEST := $(BUILD)/policy_test
 
-# 源文件
-SRCS := src/main.c \
-        hook/blkdev.c \
-        procfs/interface.c
+.PHONY: all test kpm clean
 
-OBJS := $(SRCS:.c=.o)
+all: test
 
-# 编译选项
-CFLAGS := -Iinclude -I$(KP_SDK)/include \
-          -Wall -Werror -O2 -fno-stack-protector \
-          -DKPM_NAME=\"$(KPM_NAME)\"
+$(BUILD):
+	mkdir -p $@
 
-# 使用 KernelPatch 的构建系统
-include $(KP_SDK)/kpm.mk
+$(POLICY_TEST): src/policy.c tests/policy_test.c include/dl_policy.h | $(BUILD)
+	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O2 \
+		-Iinclude src/policy.c tests/policy_test.c -o $@
 
-all: $(KPM_NAME).kpm
+test: $(POLICY_TEST)
+	./$(POLICY_TEST)
+
+# The KPM adapter dereferences version-dependent block-layer structures.
+# Refuse to build it without the target's matching kernel headers.
+kpm:
+	@if [ ! -d "$(KP_DIR)/kernel" ]; then \
+		echo "error: KP_DIR must point to KernelPatch SDK"; exit 1; \
+	fi
+	@if [ -z "$(KDIR)" ] || [ ! -d "$(KDIR)" ]; then \
+		echo "error: KDIR must point to matching target kernel source/headers"; exit 1; \
+	fi
+	@echo "KPM adapter build is gated until the target ABI adapter is selected."
+	@echo "Run make test for the v0.2 policy prototype."
+	@exit 2
 
 clean:
-	rm -f src/*.o hook/*.o procfs/*.o
-	rm -f $(KPM_NAME).kpm $(KPM_NAME).ko
-
-.PHONY: all clean
+	rm -rf $(BUILD)
+	find . -name '*.o' -delete
+	rm -f *.kpm

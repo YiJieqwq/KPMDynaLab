@@ -27,6 +27,24 @@ KPMDynaLab hooks at the **block layer** — 4 layers below libc — where no use
 app → libc → syscall → VFS → blkdev_open ← KPMDynaLab inline hook
 ```
 
+## Development Status
+
+> **v0.2 policy prototype:** TRACE/AUTO/EXPERT, SEALED state transitions, fail-closed behavior, dangerous-storage simulation, reboot suppression, and expert breakpoint rules are implemented in the portable policy core and covered by tests. The target-specific KPM adapter remains build-gated until matching device kernel headers are supplied; kernel ABI layouts are not guessed.
+
+```bash
+make test
+```
+
+See [Analysis Profiles](docs/PROFILES.md) for the current behavior and limitations.
+
+## Analysis Profiles
+
+| Profile | Intended use | Dangerous storage behavior |
+|:---|:---|:---|
+| **TRACE** | Confirmed-safe programs or sacrificial test devices | Record and pass through |
+| **AUTO** | Malware verdict and initial behavior analysis | Record and simulate success |
+| **EXPERT** | Dynamic reverse engineering | Custom rules and behavior breakpoints |
+
 ## Quick Start
 
 ```bash
