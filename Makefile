@@ -29,7 +29,7 @@ test: $(POLICY_TEST)
 # Build the device-test KPM against Android 16 / Linux 6.12 headers.
 KPM_SRC := kpm/dynalab_kpm.c
 KPM_OBJ := $(BUILD)/dynalab_kpm.o
-KPM_OUT := $(BUILD)/KPMDynaLab-0.3.1-test.kpm
+KPM_OUT := $(BUILD)/KPMDynaLab-0.3.2-test.kpm
 KPM_INCLUDES := \
 	-I$(KDIR)/arch/arm64/include \
 	-I$(KDIR)/arch/arm64/include/generated \
@@ -39,7 +39,8 @@ KPM_INCLUDES := \
 	-I$(KDIR)/include/uapi \
 	-I$(KDIR)/include/generated/uapi
 KPM_CFLAGS := -D__KERNEL__ -DMODULE '-DKBUILD_MODNAME="KPMDynaLab"' \
-	-O2 -fno-pic -fno-stack-protector -mgeneral-regs-only \
+	-O2 -fno-pic -fno-stack-protector -fno-asynchronous-unwind-tables \
+	-fno-unwind-tables -mgeneral-regs-only \
 	-Wno-address-of-packed-member $(KPM_INCLUDES) \
 	-include $(KDIR)/include/linux/compiler-version.h \
 	-include $(KDIR)/include/linux/kconfig.h

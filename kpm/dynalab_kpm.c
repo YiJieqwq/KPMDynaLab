@@ -48,7 +48,7 @@ extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
 #define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.3.1-test");
+KPM_VERSION("0.3.2-test");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("Linuxnhe Developers");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
