@@ -27,21 +27,24 @@ KPMDynaLab hooks at the **block layer** — 4 layers below libc — where no use
 app → libc → syscall → VFS → blkdev_open ← KPMDynaLab inline hook
 ```
 
-## Device Test Build (v0.3.3-test)
+## CLI Test Build (v0.4.0-test)
 
-A first hot-loadable KPM adapter is available for **Android 16 / Linux 6.12.23 / 4 KiB pages**. It hooks `blkdev_write_iter`, `blkdev_ioctl`, `blkdev_fallocate`, and `__arm64_sys_reboot`. AUTO simulates dangerous block operations; TRACE passes them through; READY fails safe to simulation.
+The first authenticated static ARM64 CLI is available for **Android 16 / Linux 6.12.23 / 4 KiB pages**. Manager CTL0 is restricted to credential setup, status, and emergency reset. Normal profile selection, sealing, event viewing, target execution, and stop operations use `/proc/dynalab/control` through the logged-in CLI.
+
+The KPM hooks `blkdev_write_iter`, `blkdev_ioctl`, `blkdev_fallocate`, and `__arm64_sys_reboot`. AUTO simulates dangerous block operations; TRACE passes them through.
 
 Build:
 
 ```bash
+make cli
 make kpm KDIR=/path/to/prepared/android16-6.12
 ```
 
-Follow [the device test guide](docs/DEVICE_TEST.md). Start with the loop-backed smoke test, not a real partition.
+Follow [the CLI device test guide](docs/CLI_TEST.md). Start with the loop-backed smoke test, not a real partition.
 
 ## Development Status
 
-> **v0.3 device-test build:** the portable TRACE/AUTO/EXPERT policy core is covered by tests, and a minimal Android 16/6.12.23 KPM adapter now provides global block-write/ioctl/fallocate simulation plus reboot suppression. Process lineage, file-drop tracing, password login, shadow readback, and interactive expert breakpoints remain future work.
+> **v0.4 CLI prototype:** password/verifier setup through trusted CTL0, root-only procfs RPC, TGID-bound CLI login, TRACE/AUTO/EXPERT selection, SEALED state, a 256-record binary event ring, event display, and `run` are implemented. Process lineage, file-drop tracing, shadow readback, final challenge/HMAC authentication, interactive expert breakpoints, and Flag Challenge remain future work.
 
 ```bash
 make test

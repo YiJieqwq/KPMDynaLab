@@ -5,6 +5,7 @@
 
 HOST_CC ?= cc
 TARGET_COMPILE ?= aarch64-linux-gnu-
+CLI_CC ?= aarch64-linux-gnu-gcc
 CC := $(TARGET_COMPILE)gcc
 KP_DIR ?= $(HOME)/KernelPatch
 KDIR ?=
@@ -12,7 +13,7 @@ KDIR ?=
 BUILD := build
 POLICY_TEST := $(BUILD)/policy_test
 
-.PHONY: all test kpm clean
+.PHONY: all test kpm cli clean
 
 all: test
 
@@ -26,10 +27,20 @@ $(POLICY_TEST): src/policy.c tests/policy_test.c include/dl_policy.h | $(BUILD)
 test: $(POLICY_TEST)
 	./$(POLICY_TEST)
 
+CLI_OUT := $(BUILD)/dynalab-arm64
+
+cli: $(CLI_OUT)
+	@file $(CLI_OUT)
+	@echo "Built: $(CLI_OUT)"
+
+$(CLI_OUT): cli/dynalab.c include/dl_rpc.h | $(BUILD)
+	$(CLI_CC) -std=c11 -Wall -Wextra -Werror -O2 -static \
+		-Iinclude cli/dynalab.c -o $@
+
 # Build the device-test KPM against Android 16 / Linux 6.12 headers.
 KPM_SRC := kpm/dynalab_kpm.c
 KPM_OBJ := $(BUILD)/dynalab_kpm.o
-KPM_OUT := $(BUILD)/KPMDynaLab-0.3.3-test.kpm
+KPM_OUT := $(BUILD)/KPMDynaLab-0.4.0-test.kpm
 KPM_INCLUDES := \
 	-I$(KDIR)/arch/arm64/include \
 	-I$(KDIR)/arch/arm64/include/generated \

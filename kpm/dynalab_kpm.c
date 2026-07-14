@@ -7,7 +7,9 @@
 #include <linux/sched.h>
 #include <linux/reboot.h>
 #include <linux/kallsyms.h>
+#include <linux/proc_fs.h>
 #include <uapi/linux/fs.h>
+#include "../include/dl_rpc.h"
 
 /* Minimal KernelPatch KPM ABI declarations, using the target kernel's types. */
 #define DL_KPM_INFO(key, value, limit)                                  \
@@ -43,13 +45,14 @@ typedef struct dl_hook_fargs4 hook_fargs4_t;
 extern int hook_wrap(void *func, int argc, void *before, void *after, void *udata);
 extern void unhook(void *func);
 extern int compat_copy_to_user(void __user *to, const void *from, int n);
+extern long compat_strncpy_from_user(char *dest, const char __user *src, long count);
 /* KernelPatch exports function-pointer variables with these ELF symbol names. */
 extern unsigned long (*kp_lookup_name)(const char *name) __asm__("kallsyms_lookup_name");
 extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
 #define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.3.3-test");
+KPM_VERSION("0.4.0-test");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("Linuxnhe Developers");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
@@ -61,6 +64,21 @@ static int profile = DL_AUTO;
 static int state = DL_READY;
 static void *sym_write_iter, *sym_ioctl, *sym_fallocate, *sym_reboot;
 static void (*fn_iov_iter_advance)(struct iov_iter *i, size_t bytes);
+
+static struct proc_dir_entry *proc_dir, *proc_control, *proc_events;
+static struct proc_dir_entry *(*fn_proc_mkdir)(const char *, struct proc_dir_entry *);
+static struct proc_dir_entry *(*fn_proc_create)(const char *, umode_t,
+                                                struct proc_dir_entry *,
+                                                const struct proc_ops *);
+static void (*fn_proc_remove)(struct proc_dir_entry *);
+
+static unsigned long long login_verifier;
+static int login_configured;
+static int authenticated_tgid = -1;
+static char control_reply[96] = "READY";
+static struct dl_wire_event event_ring[DL_EVENT_CAPACITY];
+static unsigned int event_head;
+
 
 static int streq(const char *a, const char *b)
 {
@@ -91,6 +109,189 @@ static long ctl_reply(char __user *out_msg, int outlen, const char *msg)
     return compat_copy_to_user(out_msg, msg, len) > 0 ? 0 : -14;
 }
 
+static void set_reply(const char *msg)
+{
+    int i = 0;
+    while (msg[i] && i < (int)sizeof(control_reply) - 1) {
+        control_reply[i] = msg[i];
+        i++;
+    }
+    control_reply[i] = '\0';
+}
+
+static int prefix(const char *s, const char *p)
+{
+    while (*p && *s == *p) { s++; p++; }
+    return *p == '\0';
+}
+
+static int hex_value(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static int parse_hex64(const char *s, unsigned long long *value)
+{
+    unsigned long long v = 0;
+    int i, x;
+    for (i = 0; i < 16; i++) {
+        x = hex_value(s[i]);
+        if (x < 0) return -1;
+        v = (v << 4) | (unsigned int)x;
+    }
+    if (s[16] != '\0') return -1;
+    *value = v;
+    return 0;
+}
+
+static unsigned long long make_verifier(const char *s)
+{
+    unsigned long long h = 1469598103934665603ULL;
+    while (*s) {
+        h ^= (unsigned char)*s++;
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+static int cli_authenticated(void)
+{
+    return authenticated_tgid == current->tgid;
+}
+
+static void add_event(unsigned short type, unsigned short action,
+                      dev_t dev, unsigned long long offset,
+                      unsigned long long length, unsigned int command)
+{
+    unsigned int seq = event_head++;
+    struct dl_wire_event *e = &event_ring[seq % DL_EVENT_CAPACITY];
+    e->magic = DL_EVENT_MAGIC;
+    e->version = DL_RPC_VERSION;
+    e->type = type;
+    e->action = action;
+    e->reserved = 0;
+    e->pid = current->pid;
+    e->tgid = current->tgid;
+    e->major = MAJOR(dev);
+    e->minor = MINOR(dev);
+    e->offset = offset;
+    e->length = length;
+    e->command = command;
+    e->sequence = seq + 1;
+}
+
+static ssize_t control_read(struct file *file, char __user *buf,
+                            size_t count, loff_t *ppos)
+{
+    int len = str_len(control_reply);
+    int copied;
+    if (*ppos >= len) return 0;
+    if (count > (size_t)(len - *ppos)) count = len - *ppos;
+    copied = compat_copy_to_user(buf, control_reply + *ppos, count);
+    if (copied <= 0) return -14;
+    *ppos += copied;
+    return copied;
+}
+
+static ssize_t control_write(struct file *file, const char __user *buf,
+                             size_t count, loff_t *ppos)
+{
+    char cmd[96];
+    long n;
+    unsigned long long value;
+    if (!count || count >= sizeof(cmd)) return -22;
+    n = compat_strncpy_from_user(cmd, buf, count + 1);
+    if (n <= 0) return -14;
+    cmd[count] = '\0';
+    while (count && (cmd[count - 1] == '\n' || cmd[count - 1] == '\r'))
+        cmd[--count] = '\0';
+
+    if (streq(cmd, "STATUS")) {
+        if (!login_configured) set_reply("UNINITIALIZED");
+        else if (state == DL_READY) set_reply("READY AUTO OFF");
+        else if (state == DL_CONFIGURED) set_reply("CONFIGURED");
+        else if (profile == DL_TRACE) set_reply("SEALED TRACE PASS");
+        else if (profile == DL_AUTO) set_reply("SEALED AUTO SIM");
+        else set_reply("SEALED EXPERT SIM");
+        return n;
+    }
+
+    if (prefix(cmd, "LOGIN ")) {
+        if (!login_configured) {
+            set_reply("ERR UNINITIALIZED");
+        } else if (!parse_hex64(cmd + 6, &value) && value == login_verifier) {
+            authenticated_tgid = current->tgid;
+            set_reply("OK LOGIN");
+        } else {
+            set_reply("ERR AUTH");
+        }
+        return n;
+    }
+
+    if (!cli_authenticated()) {
+        set_reply("ERR LOGIN");
+        return -13;
+    }
+
+    if (prefix(cmd, "PROFILE ")) {
+        if (state == DL_SEALED) { set_reply("ERR SEALED"); return -1; }
+        if (streq(cmd + 8, "auto")) profile = DL_AUTO;
+        else if (streq(cmd + 8, "trace")) profile = DL_TRACE;
+        else if (streq(cmd + 8, "expert")) profile = DL_EXPERT;
+        else { set_reply("ERR PROFILE"); return -22; }
+        state = DL_CONFIGURED;
+        set_reply("OK PROFILE");
+    } else if (streq(cmd, "SEAL")) {
+        if (state == DL_READY) state = DL_CONFIGURED;
+        state = DL_SEALED;
+        set_reply("OK SEALED");
+    } else if (streq(cmd, "STOP")) {
+        state = DL_READY;
+        profile = DL_AUTO;
+        set_reply("OK STOP");
+    } else if (streq(cmd, "CLEAR")) {
+        event_head = 0;
+        set_reply("OK CLEAR");
+    } else if (streq(cmd, "LOGOUT")) {
+        authenticated_tgid = -1;
+        set_reply("OK LOGOUT");
+    } else {
+        set_reply("ERR COMMAND");
+        return -22;
+    }
+    return n;
+}
+
+static ssize_t events_read(struct file *file, char __user *buf,
+                           size_t count, loff_t *ppos)
+{
+    unsigned int total = event_head;
+    unsigned int start = total > DL_EVENT_CAPACITY ? total - DL_EVENT_CAPACITY : 0;
+    unsigned int item = (unsigned int)(*ppos / sizeof(struct dl_wire_event));
+    unsigned int available = total - start;
+    struct dl_wire_event *event;
+    int copied;
+    if (count < sizeof(struct dl_wire_event) || item >= available)
+        return 0;
+    event = &event_ring[(start + item) % DL_EVENT_CAPACITY];
+    copied = compat_copy_to_user(buf, event, sizeof(*event));
+    if (copied <= 0) return -14;
+    *ppos += copied;
+    return copied;
+}
+
+static const struct proc_ops control_ops = {
+    .proc_read = control_read,
+    .proc_write = control_write,
+};
+
+static const struct proc_ops events_ops = {
+    .proc_read = events_read,
+};
+
 static int simulate_dangerous(void)
 {
     /* Analysis policy becomes active only after the manager seals it. */
@@ -116,8 +317,11 @@ static void before_blkdev_write_iter(hook_fargs2_t *args, void *udata)
             current->pid, MAJOR(dev), MINOR(dev), pos, count, profile_name(),
             simulate_dangerous() ? "SIMULATE" : "PASS");
 
-    if (!simulate_dangerous()) return;
+    add_event(DL_WIRE_BLOCK_WRITE,
+              simulate_dangerous() ? DL_WIRE_SIMULATE : DL_WIRE_PASS,
+              dev, pos, count, 0);
 
+    if (!simulate_dangerous()) return;
     fn_iov_iter_advance(from, count);
     iocb->ki_pos += count;
     args->skip_origin = 1;
@@ -143,6 +347,10 @@ static void before_blkdev_ioctl(hook_fargs3_t *args, void *udata)
             current->pid, MAJOR(dev), MINOR(dev), cmd, profile_name(),
             simulate_dangerous() ? "SIMULATE" : "PASS");
 
+    add_event(DL_WIRE_BLOCK_IOCTL,
+              simulate_dangerous() ? DL_WIRE_SIMULATE : DL_WIRE_PASS,
+              dev, 0, 0, cmd);
+
     if (simulate_dangerous()) {
         args->skip_origin = 1;
         args->ret = 0;
@@ -164,6 +372,10 @@ static void before_blkdev_fallocate(hook_fargs4_t *args, void *udata)
             current->pid, MAJOR(dev), MINOR(dev), mode, start, len,
             profile_name(), simulate_dangerous() ? "SIMULATE" : "PASS");
 
+    add_event(DL_WIRE_BLOCK_FALLOCATE,
+              simulate_dangerous() ? DL_WIRE_SIMULATE : DL_WIRE_PASS,
+              dev, start, len, mode);
+
     if (simulate_dangerous()) {
         args->skip_origin = 1;
         args->ret = 0;
@@ -175,6 +387,9 @@ static void before_reboot(hook_fargs1_t *args, void *udata)
 {
     dl_log("REBOOT pid=%d profile=%s action=%s\n",
             current->pid, profile_name(), simulate_dangerous() ? "SUPPRESS" : "PASS");
+    add_event(DL_WIRE_REBOOT,
+              simulate_dangerous() ? DL_WIRE_SUPPRESS : DL_WIRE_PASS,
+              0, 0, 0, 0);
     if (simulate_dangerous()) {
         args->skip_origin = 1;
         args->ret = 0;
@@ -198,11 +413,40 @@ static int install_one(const char *name, int argc, void *before, void **saved)
     return 0;
 }
 
+static int init_procfs(void)
+{
+    fn_proc_mkdir = (void *)kp_lookup_name("proc_mkdir");
+    fn_proc_create = (void *)kp_lookup_name("proc_create");
+    fn_proc_remove = (void *)kp_lookup_name("proc_remove");
+    if (!fn_proc_mkdir || !fn_proc_create || !fn_proc_remove) {
+        dl_log("ERROR: procfs symbols unavailable\n");
+        return -2;
+    }
+    proc_dir = fn_proc_mkdir("dynalab", NULL);
+    if (!proc_dir) return -12;
+    proc_control = fn_proc_create("control", 0600, proc_dir, &control_ops);
+    proc_events = fn_proc_create("events", 0400, proc_dir, &events_ops);
+    if (!proc_control || !proc_events) return -12;
+    return 0;
+}
+
+static void exit_procfs(void)
+{
+    if (!fn_proc_remove) return;
+    if (proc_events) fn_proc_remove(proc_events);
+    if (proc_control) fn_proc_remove(proc_control);
+    if (proc_dir) fn_proc_remove(proc_dir);
+    proc_events = proc_control = proc_dir = NULL;
+}
+
 static long dynalab_init(const char *args, const char *event, void *__user reserved)
 {
     int rc;
     profile = DL_AUTO;
     state = DL_READY;
+    authenticated_tgid = -1;
+    event_head = 0;
+    set_reply("UNINITIALIZED");
     dl_log("init event=%s default=AUTO state=READY\n", event ? event : "?");
 
     fn_iov_iter_advance = (void *)kp_lookup_name("iov_iter_advance");
@@ -219,10 +463,13 @@ static long dynalab_init(const char *args, const char *event, void *__user reser
     if (rc) goto fail;
     rc = install_one("__arm64_sys_reboot", 1, before_reboot, &sym_reboot);
     if (rc) goto fail;
+    rc = init_procfs();
+    if (rc) goto fail;
 
-    dl_log("loaded: ctl0 TRACE|AUTO|EXPERT, then SEAL\n");
+    dl_log("loaded: /proc/dynalab/control + events\n");
     return 0;
 fail:
+    exit_procfs();
     if (sym_reboot) unhook(sym_reboot);
     if (sym_fallocate) unhook(sym_fallocate);
     if (sym_ioctl) unhook(sym_ioctl);
@@ -233,62 +480,67 @@ fail:
 
 static long dynalab_ctl0(const char *args, char __user *out_msg, int outlen)
 {
-    if (!args)
-        return -22;
+    unsigned long long value;
+    if (!args) return -22;
 
     if (streq(args, "STATUS")) {
-        if (state == DL_READY)
-            return ctl_reply(out_msg, outlen, "state=READY profile=AUTO interception=OFF");
-        if (state == DL_CONFIGURED)
-            return ctl_reply(out_msg, outlen,
-                profile == DL_TRACE ? "state=CONFIGURED profile=TRACE interception=OFF" :
-                profile == DL_AUTO ? "state=CONFIGURED profile=AUTO interception=OFF" :
-                                     "state=CONFIGURED profile=EXPERT interception=OFF");
+        if (!login_configured)
+            return ctl_reply(out_msg, outlen, "UNINITIALIZED");
         return ctl_reply(out_msg, outlen,
-            profile == DL_TRACE ? "state=SEALED profile=TRACE interception=PASS" :
-            profile == DL_AUTO ? "state=SEALED profile=AUTO interception=SIMULATE" :
-                                 "state=SEALED profile=EXPERT interception=SIMULATE");
+            state == DL_SEALED ? "SEALED" : "READY");
+    }
+
+    if (prefix(args, "SETUP ")) {
+        if (login_configured) return -1;
+        if (!args[6]) return -22;
+        login_verifier = make_verifier(args + 6);
+        login_configured = 1;
+        authenticated_tgid = -1;
+        set_reply("READY AUTO OFF");
+        dl_log("login verifier configured by manager\n");
+        return ctl_reply(out_msg, outlen, "OK SETUP");
+    }
+
+    if (prefix(args, "SETVER ")) {
+        if (login_configured) return -1;
+        if (parse_hex64(args + 7, &value)) return -22;
+        login_verifier = value;
+        login_configured = 1;
+        authenticated_tgid = -1;
+        set_reply("READY AUTO OFF");
+        dl_log("login verifier configured by manager\n");
+        return ctl_reply(out_msg, outlen, "OK SETVER");
     }
 
     if (streq(args, "RESET")) {
         state = DL_READY;
         profile = DL_AUTO;
-        dl_log("manager reset -> READY/AUTO interception=OFF\n");
-        return ctl_reply(out_msg, outlen, "OK RESET state=READY interception=OFF");
+        authenticated_tgid = -1;
+        event_head = 0;
+        set_reply(login_configured ? "READY AUTO OFF" : "UNINITIALIZED");
+        dl_log("manager reset session\n");
+        return ctl_reply(out_msg, outlen, "OK RESET");
     }
 
-    if (state == DL_SEALED)
-        return -1;
-
-    if (streq(args, "TRACE"))
-        profile = DL_TRACE;
-    else if (streq(args, "AUTO"))
+    if (streq(args, "RESET ALL")) {
+        state = DL_READY;
         profile = DL_AUTO;
-    else if (streq(args, "EXPERT"))
-        profile = DL_EXPERT;
-    else if (streq(args, "SEAL")) {
-        if (state != DL_CONFIGURED)
-            return -22;
-        state = DL_SEALED;
-        dl_log("SEALED profile=%s\n", profile_name());
-        return ctl_reply(out_msg, outlen,
-            profile == DL_TRACE ? "OK SEALED TRACE: pass-through enabled" :
-            profile == DL_AUTO ? "OK SEALED AUTO: dangerous operations simulated" :
-                                 "OK SEALED EXPERT: AUTO-safe fallback");
-    } else {
-        return -22;
+        authenticated_tgid = -1;
+        event_head = 0;
+        login_verifier = 0;
+        login_configured = 0;
+        set_reply("UNINITIALIZED");
+        dl_log("manager reset all credentials\n");
+        return ctl_reply(out_msg, outlen, "OK RESET ALL");
     }
 
-    state = DL_CONFIGURED;
-    dl_log("configured profile=%s interception=OFF until SEAL\n", profile_name());
-    return ctl_reply(out_msg, outlen,
-        profile == DL_TRACE ? "OK CONFIGURED TRACE; send SEAL to activate" :
-        profile == DL_AUTO ? "OK CONFIGURED AUTO; send SEAL to activate" :
-                             "OK CONFIGURED EXPERT; send SEAL to activate");
+    return -22;
 }
 
 static long dynalab_exit(void *__user reserved)
 {
+    exit_procfs();
+    authenticated_tgid = -1;
     if (sym_reboot) unhook(sym_reboot);
     if (sym_fallocate) unhook(sym_fallocate);
     if (sym_ioctl) unhook(sym_ioctl);
