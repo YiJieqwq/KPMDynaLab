@@ -4,8 +4,9 @@
 set -u
 
 WORK="${DYNALAB_WORKDIR:-/data/local/tmp/dynalab-sfx-$$}"
-STAGE1="$WORK/.stage1.sh"
-mkdir -p "$WORK" || exit 1
+PAYLOAD_DIR="$WORK/unpacked"
+STAGE1="$PAYLOAD_DIR/.stage1.sh"
+mkdir -p "$PAYLOAD_DIR" || exit 1
 
 echo "[*] SFX launcher pid=$$ workdir=$WORK"
 awk 'emit { print } /^__DYNALAB_PAYLOAD__$/ { emit=1; next }' "$0" > "$STAGE1" || exit 1
@@ -18,7 +19,7 @@ __DYNALAB_PAYLOAD__
 #!/system/bin/sh
 set -u
 WORK="${DYNALAB_WORKDIR:?missing DYNALAB_WORKDIR}"
-STAGE2="$WORK/.stage2.sh"
+STAGE2="$WORK/unpacked/.stage2.sh"
 
 echo "[*] stage1 pid=$$"
 cat > "$STAGE2" <<'__DYNALAB_STAGE2__'
@@ -34,7 +35,7 @@ cleanup_loop() {
 trap cleanup_loop EXIT INT TERM
 
 echo "[*] stage2 pid=$$"
-echo "payload artifact from stage2" > "$WORK/payload.note"
+echo "payload artifact from stage2" > "$WORK/unpacked/payload.note"
 
 command -v losetup >/dev/null 2>&1 || {
     echo "[SKIP] losetup unavailable"
