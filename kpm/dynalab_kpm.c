@@ -52,7 +52,7 @@ extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
 #define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.4.0-test");
+KPM_VERSION("0.4.1-test");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("Linuxnhe Developers");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
@@ -64,6 +64,8 @@ static int profile = DL_AUTO;
 static int state = DL_READY;
 static void *sym_write_iter, *sym_ioctl, *sym_fallocate, *sym_reboot;
 static void (*fn_iov_iter_advance)(struct iov_iter *i, size_t bytes);
+static pid_t (*fn_task_pid_nr)(struct task_struct *task, int type,
+                               struct pid_namespace *ns);
 
 static struct proc_dir_entry *proc_dir, *proc_control, *proc_events;
 static struct proc_dir_entry *(*fn_proc_mkdir)(const char *, struct proc_dir_entry *);
@@ -157,9 +159,15 @@ static unsigned long long make_verifier(const char *s)
     return h;
 }
 
+static int current_id(int type)
+{
+    if (!fn_task_pid_nr) return -1;
+    return fn_task_pid_nr(current, type, NULL);
+}
+
 static int cli_authenticated(void)
 {
-    return authenticated_tgid == current->tgid;
+    return authenticated_tgid == current_id(1);
 }
 
 static void add_event(unsigned short type, unsigned short action,
@@ -173,8 +181,8 @@ static void add_event(unsigned short type, unsigned short action,
     e->type = type;
     e->action = action;
     e->reserved = 0;
-    e->pid = current->pid;
-    e->tgid = current->tgid;
+    e->pid = current_id(0);
+    e->tgid = current_id(1);
     e->major = MAJOR(dev);
     e->minor = MINOR(dev);
     e->offset = offset;
@@ -223,7 +231,7 @@ static ssize_t control_write(struct file *file, const char __user *buf,
         if (!login_configured) {
             set_reply("ERR UNINITIALIZED");
         } else if (!parse_hex64(cmd + 6, &value) && value == login_verifier) {
-            authenticated_tgid = current->tgid;
+            authenticated_tgid = current_id(1);
             set_reply("OK LOGIN");
         } else {
             set_reply("ERR AUTH");
@@ -314,7 +322,7 @@ static void before_blkdev_write_iter(hook_fargs2_t *args, void *udata)
         dev = iocb->ki_filp->f_mapping->host->i_rdev;
 
     dl_log("BLOCK_WRITE pid=%d dev=%u:%u off=%lld len=%zu profile=%s action=%s\n",
-            current->pid, MAJOR(dev), MINOR(dev), pos, count, profile_name(),
+            current_id(0), MAJOR(dev), MINOR(dev), pos, count, profile_name(),
             simulate_dangerous() ? "SIMULATE" : "PASS");
 
     add_event(DL_WIRE_BLOCK_WRITE,
@@ -344,7 +352,7 @@ static void before_blkdev_ioctl(hook_fargs3_t *args, void *udata)
         dev = file->f_mapping->host->i_rdev;
 
     dl_log("BLOCK_IOCTL pid=%d dev=%u:%u cmd=0x%x profile=%s action=%s\n",
-            current->pid, MAJOR(dev), MINOR(dev), cmd, profile_name(),
+            current_id(0), MAJOR(dev), MINOR(dev), cmd, profile_name(),
             simulate_dangerous() ? "SIMULATE" : "PASS");
 
     add_event(DL_WIRE_BLOCK_IOCTL,
@@ -369,7 +377,7 @@ static void before_blkdev_fallocate(hook_fargs4_t *args, void *udata)
         dev = file->f_mapping->host->i_rdev;
 
     dl_log("BLOCK_FALLOCATE pid=%d dev=%u:%u mode=0x%x off=%lld len=%lld profile=%s action=%s\n",
-            current->pid, MAJOR(dev), MINOR(dev), mode, start, len,
+            current_id(0), MAJOR(dev), MINOR(dev), mode, start, len,
             profile_name(), simulate_dangerous() ? "SIMULATE" : "PASS");
 
     add_event(DL_WIRE_BLOCK_FALLOCATE,
@@ -386,7 +394,7 @@ static void before_blkdev_fallocate(hook_fargs4_t *args, void *udata)
 static void before_reboot(hook_fargs1_t *args, void *udata)
 {
     dl_log("REBOOT pid=%d profile=%s action=%s\n",
-            current->pid, profile_name(), simulate_dangerous() ? "SUPPRESS" : "PASS");
+            current_id(0), profile_name(), simulate_dangerous() ? "SUPPRESS" : "PASS");
     add_event(DL_WIRE_REBOOT,
               simulate_dangerous() ? DL_WIRE_SUPPRESS : DL_WIRE_PASS,
               0, 0, 0, 0);
@@ -450,8 +458,9 @@ static long dynalab_init(const char *args, const char *event, void *__user reser
     dl_log("init event=%s default=AUTO state=READY\n", event ? event : "?");
 
     fn_iov_iter_advance = (void *)kp_lookup_name("iov_iter_advance");
-    if (!fn_iov_iter_advance) {
-        dl_log("ERROR: symbol not found: iov_iter_advance\n");
+    fn_task_pid_nr = (void *)kp_lookup_name("__task_pid_nr_ns");
+    if (!fn_iov_iter_advance || !fn_task_pid_nr) {
+        dl_log("ERROR: helper symbol not found\n");
         return -2;
     }
 
