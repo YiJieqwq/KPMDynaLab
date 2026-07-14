@@ -63,7 +63,7 @@ extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
 #define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.6.4-protocol-test");
+KPM_VERSION("0.7.0-sealed-mkdir-test");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("YiJieqwq");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
@@ -77,6 +77,7 @@ static void *sym_write_iter, *sym_ioctl, *sym_fallocate, *sym_reboot;
 static void *sym_fork, *sym_exec, *sym_exit;
 static void *sym_vfs_create, *sym_vfs_mkdir, *sym_vfs_write;
 static void *sym_do_filp_open;
+static void *sym_do_mkdirat;
 static void *sym_notify_change, *sym_vfs_unlink, *sym_vfs_truncate;
 static void (*fn_iov_iter_advance)(struct iov_iter *i, size_t bytes);
 static pid_t (*fn_task_pid_nr)(struct task_struct *task, int type,
@@ -93,6 +94,7 @@ static unsigned long long login_verifier;
 static int login_configured;
 static int authenticated_tgid = -1;
 static int hello_tgid = -1;
+static int reply_tgid = -1;
 static char control_reply[96] = "READY";
 static struct dl_wire_event event_ring[DL_EVENT_CAPACITY];
 static unsigned int event_head;
@@ -344,6 +346,7 @@ static ssize_t control_read(struct file *file, char __user *buf,
 {
     int len = str_len(control_reply);
     int copied;
+    if (reply_tgid != current_id(1)) return -13;
     if (*ppos >= len) return 0;
     if (count > (size_t)(len - *ppos)) count = len - *ppos;
     copied = compat_copy_to_user(buf, control_reply + *ppos, count);
@@ -364,9 +367,14 @@ static ssize_t control_write(struct file *file, const char __user *buf,
     cmd[count] = '\0';
     while (count && (cmd[count - 1] == '\n' || cmd[count - 1] == '\r'))
         cmd[--count] = '\0';
+    reply_tgid = current_id(1);
 
     if (prefix(cmd, "HELLO ")) {
         int cli_api, event_abi;
+        if (state == DL_SEALED && hello_tgid != current_id(1)) {
+            set_reply("ERR SEALED");
+            return n;
+        }
         if (parse_hello(cmd + 6, &cli_api, &event_abi)) {
             set_reply("ERR PROTOCOL");
         } else if (cli_api < DL_RPC_MIN_CLI_API) {
@@ -378,7 +386,7 @@ static ssize_t control_write(struct file *file, const char __user *buf,
                       "ERR KPM_OLD" : "ERR CLI_OLD");
         } else {
             hello_tgid = current_id(1);
-            set_reply("OK HELLO 3 2 0.6.4-protocol-test");
+            set_reply("OK HELLO 4 2 0.7.0-sealed-mkdir-test");
         }
         return n;
     }
@@ -399,6 +407,10 @@ static ssize_t control_write(struct file *file, const char __user *buf,
     }
 
     if (prefix(cmd, "LOGIN ")) {
+        if (state == DL_SEALED && authenticated_tgid != current_id(1)) {
+            set_reply("ERR SEALED");
+            return n;
+        }
         if (!login_configured) {
             set_reply("ERR UNINITIALIZED");
         } else if (!parse_hex64(cmd + 6, &value) && value == login_verifier) {
@@ -451,6 +463,10 @@ static ssize_t control_write(struct file *file, const char __user *buf,
         clear_subjects();
         set_reply("OK STOP");
     } else if (streq(cmd, "CLEAR")) {
+        if (state == DL_SEALED) {
+            set_reply("ERR SEALED");
+            return -1;
+        }
         event_head = 0;
         set_reply("OK CLEAR");
     } else if (streq(cmd, "LOGOUT")) {
@@ -468,11 +484,15 @@ static ssize_t events_read(struct file *file, char __user *buf,
                            size_t count, loff_t *ppos)
 {
     unsigned int total = event_head;
-    unsigned int start = total > DL_EVENT_CAPACITY ? total - DL_EVENT_CAPACITY : 0;
-    unsigned int item = (unsigned int)(*ppos / sizeof(struct dl_wire_event));
-    unsigned int available = total - start;
+    unsigned int start;
+    unsigned int item;
+    unsigned int available;
     struct dl_wire_event *event;
     int copied;
+    if (!cli_authenticated()) return -13;
+    start = total > DL_EVENT_CAPACITY ? total - DL_EVENT_CAPACITY : 0;
+    item = (unsigned int)(*ppos / sizeof(struct dl_wire_event));
+    available = total - start;
     if (count < sizeof(struct dl_wire_event) || item >= available)
         return 0;
     event = &event_ring[(start + item) % DL_EVENT_CAPACITY];
@@ -547,6 +567,18 @@ static void after_do_filp_open(hook_fargs3_t *args, void *udata)
         return;
     add_event_for(DL_WIRE_FILE_CREATE, DL_WIRE_PASS, pid, current_id(1),
                   s->parent_pid, 0, 0, 0, file->f_mode,
+                  s->session_id, s->scope,
+                  filename ? filename->name : NULL);
+}
+
+static void after_do_mkdirat(hook_fargs3_t *args, void *udata)
+{
+    int pid = current_id(0);
+    struct dl_subject *s = find_subject(pid);
+    struct filename *filename = (struct filename *)args->arg1;
+    if (!s || (long)args->ret != 0) return;
+    add_event_for(DL_WIRE_FILE_MKDIR, DL_WIRE_PASS, pid, current_id(1),
+                  s->parent_pid, 0, 0, 0, (unsigned int)args->arg2,
                   s->session_id, s->scope,
                   filename ? filename->name : NULL);
 }
@@ -794,6 +826,7 @@ static long dynalab_init(const char *args, const char *event, void *__user reser
     state = DL_READY;
     authenticated_tgid = -1;
     hello_tgid = -1;
+    reply_tgid = -1;
     event_head = 0;
     clear_subjects();
     set_reply("UNINITIALIZED");
@@ -814,6 +847,9 @@ static long dynalab_init(const char *args, const char *event, void *__user reser
     if (rc) goto fail;
     rc = install_one_after("do_filp_open", 3, after_do_filp_open,
                            &sym_do_filp_open);
+    if (rc) goto fail;
+    rc = install_one_after("do_mkdirat", 3, after_do_mkdirat,
+                           &sym_do_mkdirat);
     if (rc) goto fail;
     rc = install_one("vfs_write", 4, before_vfs_write, &sym_vfs_write);
     if (rc) goto fail;
@@ -838,6 +874,7 @@ fail:
     if (sym_ioctl) unhook(sym_ioctl);
     if (sym_write_iter) unhook(sym_write_iter);
     if (sym_do_filp_open) unhook(sym_do_filp_open);
+    if (sym_do_mkdirat) unhook(sym_do_mkdirat);
     if (sym_vfs_truncate) unhook(sym_vfs_truncate);
     if (sym_vfs_unlink) unhook(sym_vfs_unlink);
     if (sym_notify_change) unhook(sym_notify_change);
@@ -925,6 +962,7 @@ static long dynalab_exit(void *__user reserved)
     if (sym_ioctl) unhook(sym_ioctl);
     if (sym_write_iter) unhook(sym_write_iter);
     if (sym_do_filp_open) unhook(sym_do_filp_open);
+    if (sym_do_mkdirat) unhook(sym_do_mkdirat);
     if (sym_vfs_truncate) unhook(sym_vfs_truncate);
     if (sym_vfs_unlink) unhook(sym_vfs_unlink);
     if (sym_notify_change) unhook(sym_notify_change);

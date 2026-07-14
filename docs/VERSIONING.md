@@ -9,10 +9,10 @@ KPMDynaLab versions three independent surfaces:
 Current test values:
 
 ```text
-RPC API:   3
+RPC API:   4
 Event ABI: 2
-KPM:       0.6.4-protocol-test
-CLI:       0.6.4-test
+KPM:       0.7.0-sealed-mkdir-test
+CLI:       0.7.0-test
 ```
 
 Before STATUS or LOGIN, CLI sends:
@@ -37,7 +37,7 @@ ERR PROTOCOL
 
 The CLI refuses to prompt for a login password or issue analysis commands until HELLO succeeds. This prevents a newer CLI from parsing an older binary event layout or sending commands with changed semantics.
 
-Compatibility policy is deliberately strict during development: Event ABI must match exactly. RPC API can later support a negotiated range, but the current KPM requires CLI API 3 and exposes API 3.
+Compatibility policy is deliberately strict during development: Event ABI must match exactly. RPC API can later support a negotiated range, but the current KPM requires CLI API 4 and exposes API 4.
 
 User-facing CLI diagnostics distinguish absence from incompatibility:
 

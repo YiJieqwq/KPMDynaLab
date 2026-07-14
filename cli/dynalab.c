@@ -131,6 +131,10 @@ static int compatibility_check(char *kpm_version, size_t size)
         fprintf(stderr, "CLI component is outdated. Update the CLI.\n");
         return -1;
     }
+    if (!strncmp(reply, "ERR SEALED", 10)) {
+        fprintf(stderr, "KPM session is SEALED. Use the original CLI or Manager RESET.\n");
+        return -1;
+    }
     if (sscanf(reply, "OK HELLO %d %d %63s", &kpm_api, &event_abi,
                version) != 3) {
         fprintf(stderr, "Incompatible KPM protocol response: %s\n", reply);
@@ -278,7 +282,7 @@ int main(int argc, char **argv)
     }
 
     use_color = isatty(STDOUT_FILENO) && getenv("NO_COLOR") == NULL;
-    printf("%s%sKPMDynaLab%s %sv0.6.5-test%s\n",
+    printf("%s%sKPMDynaLab%s %sv0.7.0-test%s\n",
            clr(C_BOLD), clr(C_CYAN), clr(C_RESET), clr(C_DIM), clr(C_RESET));
     printf("%sKernel-assisted dynamic analysis laboratory%s\n\n",
            clr(C_DIM), clr(C_RESET));
@@ -306,8 +310,22 @@ int main(int argc, char **argv)
             continue;
         arg = strtok(NULL, "");
 
-        if (!strcmp(cmd, "exit") || !strcmp(cmd, "quit"))
+        if (!strcmp(cmd, "exit") || !strcmp(cmd, "quit")) {
+            if (!rpc("STATUS", reply, sizeof(reply)) &&
+                !strncmp(reply, "SEALED", 6)) {
+                char answer[16];
+                printf("Session is SEALED. Stop it before exiting? [Y/n] ");
+                fflush(stdout);
+                if (!fgets(answer, sizeof(answer), stdin) ||
+                    answer[0] == '\n' || answer[0] == 'y' || answer[0] == 'Y') {
+                    if (send_and_print("STOP"))
+                        continue;
+                } else {
+                    puts("Leaving protection SEALED; Manager RESET may be required.");
+                }
+            }
             break;
+        }
         if (!strcmp(cmd, "help")) {
             help();
         } else if (!strcmp(cmd, "status")) {
