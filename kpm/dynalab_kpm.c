@@ -63,7 +63,7 @@ extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
 #define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.6.1-create-test");
+KPM_VERSION("0.6.2-open-create-test");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("YiJieqwq");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
@@ -76,6 +76,7 @@ static int state = DL_READY;
 static void *sym_write_iter, *sym_ioctl, *sym_fallocate, *sym_reboot;
 static void *sym_fork, *sym_exec, *sym_exit;
 static void *sym_vfs_create, *sym_vfs_mkdir, *sym_vfs_write;
+static void *sym_do_filp_open;
 static void *sym_notify_change, *sym_vfs_unlink, *sym_vfs_truncate;
 static void (*fn_iov_iter_advance)(struct iov_iter *i, size_t bytes);
 static pid_t (*fn_task_pid_nr)(struct task_struct *task, int type,
@@ -497,6 +498,20 @@ static void before_exit(hook_fargs1_t *args, void *udata)
     s->active = 0;
 }
 
+static void after_do_filp_open(hook_fargs3_t *args, void *udata)
+{
+    int pid = current_id(0);
+    struct dl_subject *s = find_subject(pid);
+    struct filename *filename = (struct filename *)args->arg1;
+    struct file *file = (struct file *)args->ret;
+    if (!s || IS_ERR_OR_NULL(file) || !(file->f_mode & FMODE_CREATED))
+        return;
+    add_event_for(DL_WIRE_FILE_CREATE, DL_WIRE_PASS, pid, current_id(1),
+                  s->parent_pid, 0, 0, 0, file->f_mode,
+                  s->session_id, s->scope,
+                  filename ? filename->name : NULL);
+}
+
 static const char *dentry_leaf(struct dentry *dentry)
 {
     return dentry && dentry->d_name.name ? dentry->d_name.name : NULL;
@@ -687,6 +702,23 @@ static int install_one(const char *name, int argc, void *before, void **saved)
     return 0;
 }
 
+static int install_one_after(const char *name, int argc, void *after, void **saved)
+{
+    void *addr = (void *)kp_lookup_name(name);
+    int err;
+    if (!addr) {
+        dl_log("ERROR: symbol not found: %s\n", name);
+        return -2;
+    }
+    err = hook_wrap(addr, argc, NULL, after, NULL);
+    if (err) {
+        dl_log("ERROR: after-hook failed: %s err=%d\n", name, err);
+        return -(int)err;
+    }
+    *saved = addr;
+    return 0;
+}
+
 static int init_procfs(void)
 {
     fn_proc_mkdir = (void *)kp_lookup_name("proc_mkdir");
@@ -737,9 +769,10 @@ static long dynalab_init(const char *args, const char *event, void *__user reser
     if (rc) goto fail;
     rc = install_one("do_exit", 1, before_exit, &sym_exit);
     if (rc) goto fail;
-    rc = install_one("vfs_create", 5, before_vfs_create, &sym_vfs_create);
+    rc = install_one_after("do_filp_open", 3, after_do_filp_open,
+                           &sym_do_filp_open);
     if (rc) goto fail;
-    /* File hooks are staged after a v0.6.0 panic in before_vfs_unlink. */
+    /* Remaining file hooks stay staged after the v0.6.0 unlink panic. */
     rc = install_one("blkdev_write_iter", 2, before_blkdev_write_iter, &sym_write_iter);
     if (rc) goto fail;
     rc = install_one("blkdev_ioctl", 3, before_blkdev_ioctl, &sym_ioctl);
@@ -759,6 +792,7 @@ fail:
     if (sym_fallocate) unhook(sym_fallocate);
     if (sym_ioctl) unhook(sym_ioctl);
     if (sym_write_iter) unhook(sym_write_iter);
+    if (sym_do_filp_open) unhook(sym_do_filp_open);
     if (sym_vfs_truncate) unhook(sym_vfs_truncate);
     if (sym_vfs_unlink) unhook(sym_vfs_unlink);
     if (sym_notify_change) unhook(sym_notify_change);
@@ -842,6 +876,7 @@ static long dynalab_exit(void *__user reserved)
     if (sym_fallocate) unhook(sym_fallocate);
     if (sym_ioctl) unhook(sym_ioctl);
     if (sym_write_iter) unhook(sym_write_iter);
+    if (sym_do_filp_open) unhook(sym_do_filp_open);
     if (sym_vfs_truncate) unhook(sym_vfs_truncate);
     if (sym_vfs_unlink) unhook(sym_vfs_unlink);
     if (sym_notify_change) unhook(sym_notify_change);
