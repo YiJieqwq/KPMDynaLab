@@ -27,11 +27,11 @@ KPMDynaLab hooks at the **block layer** — 4 layers below libc — where no use
 app → libc → syscall → VFS → blkdev_open ← KPMDynaLab inline hook
 ```
 
-## Process Session Test Build (v0.5.0-test)
+## File Event Test Build (v0.6.0-test)
 
-v0.5 adds target registration before exec, analysis session IDs, fork/exec/exit events, descendant inheritance, and CLI-managed per-run work directories with optional cleanup. The CLI blocks the freshly forked child until KPM acknowledges `TARGET <pid>` and the selected profile is SEALED.
+v0.6 extends process sessions with target-lineage file events for create, mkdir, write, attribute change, unlink, and truncate operations. It also gives the CLI a compact color-aware banner, prompt, and event display. Set `NO_COLOR=1` for plain output.
 
-The included self-extracting smoke sample creates two script stages, executes them, performs a simulated loop-device write, and intentionally leaves artifacts for the CLI cleanup prompt.
+Per-run cleanup remains deliberately constrained to the dedicated work directory created by the CLI. External dropped files are logged but not automatically removed until full-path and inode provenance are available.
 
 Build:
 
@@ -40,11 +40,11 @@ make cli
 make kpm KDIR=/path/to/prepared/android16-6.12
 ```
 
-Follow [the v0.5 process-session test guide](docs/V05_TEST.md).
+Follow [the v0.6 file-event test guide](docs/V06_TEST.md).
 
 ## Development Status
 
-> **v0.5 process-session prototype:** authenticated CLI control, target-before-exec registration, FORK/EXEC/EXIT events, session and parent identifiers, global block simulation, active-descendant counting, and dedicated-workdir cleanup are implemented. File-operation hooks, reliable concurrent event commits, persistent hidden RPC, shadow readback, final challenge/HMAC authentication, expert breakpoints, and Flag Challenge remain future work.
+> **v0.6 file-observation prototype:** authenticated CLI sessions, target-before-exec registration, process lineage, global block simulation, target-lineage VFS events, active-descendant counting, and safe dedicated-workdir cleanup are implemented. Full-path reconstruction, rename tracking, inode provenance, reliable concurrent event commits, persistent hidden RPC, shadow readback, challenge/HMAC, expert breakpoints, and Flag Challenge remain future work.
 
 ```bash
 make test

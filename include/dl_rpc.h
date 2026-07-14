@@ -14,6 +14,13 @@ enum dl_wire_event_type {
     DL_WIRE_FORK = 5,
     DL_WIRE_EXEC = 6,
     DL_WIRE_EXIT = 7,
+    DL_WIRE_FILE_CREATE = 8,
+    DL_WIRE_FILE_MKDIR = 9,
+    DL_WIRE_FILE_WRITE = 10,
+    DL_WIRE_FILE_ATTR = 11,
+    DL_WIRE_FILE_RENAME = 12,
+    DL_WIRE_FILE_UNLINK = 13,
+    DL_WIRE_FILE_TRUNCATE = 14,
 };
 
 enum dl_wire_action {

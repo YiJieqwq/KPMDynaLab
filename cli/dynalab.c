@@ -20,6 +20,20 @@
 #define EVENTS_PATH  "/proc/dynalab/events"
 #define MAX_LINE 512
 
+static int use_color;
+static const char *clr(const char *code)
+{
+    return use_color ? code : "";
+}
+
+#define C_RESET  "\033[0m"
+#define C_BOLD   "\033[1m"
+#define C_CYAN   "\033[36m"
+#define C_GREEN  "\033[32m"
+#define C_YELLOW "\033[33m"
+#define C_RED    "\033[31m"
+#define C_DIM    "\033[2m"
+
 static uint64_t password_verifier(const unsigned char *s, size_t n)
 {
     /* v0.4 protocol verifier; replaced by challenge/HMAC in the auth milestone. */
@@ -94,6 +108,13 @@ static const char *event_name(unsigned int type)
     case DL_WIRE_FORK: return "FORK";
     case DL_WIRE_EXEC: return "EXEC";
     case DL_WIRE_EXIT: return "EXIT";
+    case DL_WIRE_FILE_CREATE: return "FILE_CREATE";
+    case DL_WIRE_FILE_MKDIR: return "FILE_MKDIR";
+    case DL_WIRE_FILE_WRITE: return "FILE_WRITE";
+    case DL_WIRE_FILE_ATTR: return "FILE_ATTR";
+    case DL_WIRE_FILE_RENAME: return "FILE_RENAME";
+    case DL_WIRE_FILE_UNLINK: return "FILE_UNLINK";
+    case DL_WIRE_FILE_TRUNCATE: return "FILE_TRUNCATE";
     default: return "UNKNOWN";
     }
 }
@@ -120,11 +141,16 @@ static int show_events(void)
     while ((n = read(fd, &e, sizeof(e))) == (ssize_t)sizeof(e)) {
         if (e.magic != DL_EVENT_MAGIC || e.version != DL_RPC_VERSION)
             continue;
-        printf("#%-5u s=%-3u %-16s pid=%-6u ppid=%-6u dev=%u:%u "
-               "off=%llu len=%llu cmd=0x%x %-8s %s\n",
-               e.sequence, e.session_id, event_name(e.type), e.pid,
-               e.parent_pid, e.major, e.minor, e.offset, e.length,
-               e.command, action_name(e.action), e.name);
+        {
+            const char *ac = e.action == DL_WIRE_PASS ? C_GREEN :
+                             e.action == DL_WIRE_SIMULATE ? C_YELLOW : C_RED;
+            printf("%s#%-5u%s s=%-3u %-16s pid=%-6u ppid=%-6u dev=%u:%u "
+                   "off=%llu len=%llu cmd=0x%x %s%-8s%s %s\n",
+                   clr(C_DIM), e.sequence, clr(C_RESET), e.session_id,
+                   event_name(e.type), e.pid, e.parent_pid, e.major, e.minor,
+                   e.offset, e.length, e.command, clr(ac),
+                   action_name(e.action), clr(C_RESET), e.name);
+        }
     }
     close(fd);
     return n < 0 ? 1 : 0;
@@ -203,7 +229,11 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    puts("KPMDynaLab CLI v0.5.0-test");
+    use_color = isatty(STDOUT_FILENO) && getenv("NO_COLOR") == NULL;
+    printf("%s%sKPMDynaLab%s %sv0.6.0-test%s\n",
+           clr(C_BOLD), clr(C_CYAN), clr(C_RESET), clr(C_DIM), clr(C_RESET));
+    printf("%sKernel-assisted dynamic analysis laboratory%s\n\n",
+           clr(C_DIM), clr(C_RESET));
     if (rpc("STATUS", reply, sizeof(reply)) < 0) {
         fprintf(stderr, "KPMDynaLab is not available at %s\n", CONTROL_PATH);
         return 1;
@@ -214,7 +244,7 @@ int main(int argc, char **argv)
 
     while (1) {
         char *cmd, *arg;
-        fputs("DynaLab> ", stdout);
+        printf("%sDynaLab%s> ", clr(C_CYAN), clr(C_RESET));
         fflush(stdout);
         if (!fgets(line, sizeof(line), stdin))
             break;

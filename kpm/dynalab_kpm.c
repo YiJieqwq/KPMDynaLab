@@ -63,7 +63,7 @@ extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
 #define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.5.1-test");
+KPM_VERSION("0.6.0-test");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("YiJieqwq");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
@@ -75,6 +75,8 @@ static int profile = DL_AUTO;
 static int state = DL_READY;
 static void *sym_write_iter, *sym_ioctl, *sym_fallocate, *sym_reboot;
 static void *sym_fork, *sym_exec, *sym_exit;
+static void *sym_vfs_create, *sym_vfs_mkdir, *sym_vfs_write;
+static void *sym_notify_change, *sym_vfs_unlink, *sym_vfs_truncate;
 static void (*fn_iov_iter_advance)(struct iov_iter *i, size_t bytes);
 static pid_t (*fn_task_pid_nr)(struct task_struct *task, int type,
                                struct pid_namespace *ns);
@@ -495,6 +497,81 @@ static void before_exit(hook_fargs1_t *args, void *udata)
     s->active = 0;
 }
 
+static const char *dentry_leaf(struct dentry *dentry)
+{
+    return dentry && dentry->d_name.name ? dentry->d_name.name : NULL;
+}
+
+static void before_vfs_create(hook_fargs5_t *args, void *udata)
+{
+    int pid = current_id(0);
+    struct dl_subject *s = find_subject(pid);
+    struct dentry *dentry = (struct dentry *)args->arg2;
+    if (!s) return;
+    add_event_for(DL_WIRE_FILE_CREATE, DL_WIRE_PASS, pid, current_id(1),
+                  s->parent_pid, 0, 0, 0, (unsigned int)args->arg3,
+                  s->session_id, s->scope, dentry_leaf(dentry));
+}
+
+static void before_vfs_mkdir(hook_fargs4_t *args, void *udata)
+{
+    int pid = current_id(0);
+    struct dl_subject *s = find_subject(pid);
+    struct dentry *dentry = (struct dentry *)args->arg2;
+    if (!s) return;
+    add_event_for(DL_WIRE_FILE_MKDIR, DL_WIRE_PASS, pid, current_id(1),
+                  s->parent_pid, 0, 0, 0, (unsigned int)args->arg3,
+                  s->session_id, s->scope, dentry_leaf(dentry));
+}
+
+static void before_vfs_write(hook_fargs4_t *args, void *udata)
+{
+    int pid = current_id(0);
+    struct dl_subject *s = find_subject(pid);
+    struct file *file = (struct file *)args->arg0;
+    loff_t *pos = (loff_t *)args->arg3;
+    if (!s || !file) return;
+    add_event_for(DL_WIRE_FILE_WRITE, DL_WIRE_PASS, pid, current_id(1),
+                  s->parent_pid, 0, pos ? *pos : 0, args->arg2, 0,
+                  s->session_id, s->scope,
+                  dentry_leaf(file->f_path.dentry));
+}
+
+static void before_notify_change(hook_fargs4_t *args, void *udata)
+{
+    int pid = current_id(0);
+    struct dl_subject *s = find_subject(pid);
+    struct dentry *dentry = (struct dentry *)args->arg1;
+    struct iattr *attr = (struct iattr *)args->arg2;
+    if (!s) return;
+    add_event_for(DL_WIRE_FILE_ATTR, DL_WIRE_PASS, pid, current_id(1),
+                  s->parent_pid, 0, 0, 0, attr ? attr->ia_valid : 0,
+                  s->session_id, s->scope, dentry_leaf(dentry));
+}
+
+static void before_vfs_unlink(hook_fargs4_t *args, void *udata)
+{
+    int pid = current_id(0);
+    struct dl_subject *s = find_subject(pid);
+    struct dentry *dentry = (struct dentry *)args->arg2;
+    if (!s) return;
+    add_event_for(DL_WIRE_FILE_UNLINK, DL_WIRE_PASS, pid, current_id(1),
+                  s->parent_pid, 0, 0, 0, 0,
+                  s->session_id, s->scope, dentry_leaf(dentry));
+}
+
+static void before_vfs_truncate(hook_fargs2_t *args, void *udata)
+{
+    int pid = current_id(0);
+    struct dl_subject *s = find_subject(pid);
+    const struct path *path = (const struct path *)args->arg0;
+    if (!s) return;
+    add_event_for(DL_WIRE_FILE_TRUNCATE, DL_WIRE_PASS, pid, current_id(1),
+                  s->parent_pid, 0, 0, args->arg1, 0,
+                  s->session_id, s->scope,
+                  path ? dentry_leaf(path->dentry) : NULL);
+}
+
 static void before_blkdev_write_iter(hook_fargs2_t *args, void *udata)
 {
     struct kiocb *iocb = (struct kiocb *)args->arg0;
@@ -660,6 +737,18 @@ static long dynalab_init(const char *args, const char *event, void *__user reser
     if (rc) goto fail;
     rc = install_one("do_exit", 1, before_exit, &sym_exit);
     if (rc) goto fail;
+    rc = install_one("vfs_create", 5, before_vfs_create, &sym_vfs_create);
+    if (rc) goto fail;
+    rc = install_one("vfs_mkdir", 4, before_vfs_mkdir, &sym_vfs_mkdir);
+    if (rc) goto fail;
+    rc = install_one("vfs_write", 4, before_vfs_write, &sym_vfs_write);
+    if (rc) goto fail;
+    rc = install_one("notify_change", 4, before_notify_change, &sym_notify_change);
+    if (rc) goto fail;
+    rc = install_one("vfs_unlink", 4, before_vfs_unlink, &sym_vfs_unlink);
+    if (rc) goto fail;
+    rc = install_one("vfs_truncate", 2, before_vfs_truncate, &sym_vfs_truncate);
+    if (rc) goto fail;
     rc = install_one("blkdev_write_iter", 2, before_blkdev_write_iter, &sym_write_iter);
     if (rc) goto fail;
     rc = install_one("blkdev_ioctl", 3, before_blkdev_ioctl, &sym_ioctl);
@@ -679,6 +768,12 @@ fail:
     if (sym_fallocate) unhook(sym_fallocate);
     if (sym_ioctl) unhook(sym_ioctl);
     if (sym_write_iter) unhook(sym_write_iter);
+    if (sym_vfs_truncate) unhook(sym_vfs_truncate);
+    if (sym_vfs_unlink) unhook(sym_vfs_unlink);
+    if (sym_notify_change) unhook(sym_notify_change);
+    if (sym_vfs_write) unhook(sym_vfs_write);
+    if (sym_vfs_mkdir) unhook(sym_vfs_mkdir);
+    if (sym_vfs_create) unhook(sym_vfs_create);
     if (sym_exit) unhook(sym_exit);
     if (sym_exec) unhook(sym_exec);
     if (sym_fork) unhook(sym_fork);
@@ -756,6 +851,12 @@ static long dynalab_exit(void *__user reserved)
     if (sym_fallocate) unhook(sym_fallocate);
     if (sym_ioctl) unhook(sym_ioctl);
     if (sym_write_iter) unhook(sym_write_iter);
+    if (sym_vfs_truncate) unhook(sym_vfs_truncate);
+    if (sym_vfs_unlink) unhook(sym_vfs_unlink);
+    if (sym_notify_change) unhook(sym_notify_change);
+    if (sym_vfs_write) unhook(sym_vfs_write);
+    if (sym_vfs_mkdir) unhook(sym_vfs_mkdir);
+    if (sym_vfs_create) unhook(sym_vfs_create);
     if (sym_exit) unhook(sym_exit);
     if (sym_exec) unhook(sym_exec);
     if (sym_fork) unhook(sym_fork);
