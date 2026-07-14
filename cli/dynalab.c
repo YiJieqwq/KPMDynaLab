@@ -98,6 +98,39 @@ static int rpc(const char *command, char *reply, size_t reply_size)
     return 0;
 }
 
+static int compatibility_check(char *kpm_version, size_t size)
+{
+    char command[64], reply[256], version[64];
+    int kpm_api = 0, event_abi = 0;
+    int rc;
+    snprintf(command, sizeof(command), "HELLO %d %d",
+             DL_RPC_API_VERSION, DL_EVENT_ABI_VERSION);
+    rc = rpc(command, reply, sizeof(reply));
+    if (rc < 0 || !strncmp(reply, "ERR KPM_OLD", 11)) {
+        fprintf(stderr, "KPM component is too old; update required.\n");
+        fprintf(stderr, "KPM组件版本过旧，需要更新KPM。\n");
+        return -1;
+    }
+    if (!strncmp(reply, "ERR CLI_OLD", 11)) {
+        fprintf(stderr, "CLI component is too old; update required.\n");
+        fprintf(stderr, "CLI组件版本过旧，需要更新CLI。\n");
+        return -1;
+    }
+    if (sscanf(reply, "OK HELLO %d %d %63s", &kpm_api, &event_abi,
+               version) != 3) {
+        fprintf(stderr, "Incompatible KPM protocol response: %s\n", reply);
+        return -1;
+    }
+    if (kpm_api < DL_RPC_API_VERSION ||
+        event_abi != DL_EVENT_ABI_VERSION) {
+        fprintf(stderr, "KPM component is too old; update required.\n");
+        fprintf(stderr, "KPM组件版本过旧，需要更新KPM。\n");
+        return -1;
+    }
+    snprintf(kpm_version, size, "%s", version);
+    return 0;
+}
+
 static const char *event_name(unsigned int type)
 {
     switch (type) {
@@ -139,7 +172,7 @@ static int show_events(void)
         return 1;
     }
     while ((n = read(fd, &e, sizeof(e))) == (ssize_t)sizeof(e)) {
-        if (e.magic != DL_EVENT_MAGIC || e.version != DL_RPC_VERSION)
+        if (e.magic != DL_EVENT_MAGIC || e.version != DL_EVENT_ABI_VERSION)
             continue;
         {
             const char *ac = e.action == DL_WIRE_PASS ? C_GREEN :
@@ -211,6 +244,7 @@ int main(int argc, char **argv)
 {
     char line[MAX_LINE];
     char reply[256];
+    char kpm_version[64];
 
     prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
     if (geteuid() != 0)
@@ -230,10 +264,14 @@ int main(int argc, char **argv)
     }
 
     use_color = isatty(STDOUT_FILENO) && getenv("NO_COLOR") == NULL;
-    printf("%s%sKPMDynaLab%s %sv0.6.0-test%s\n",
+    printf("%s%sKPMDynaLab%s %sv0.6.4-test%s\n",
            clr(C_BOLD), clr(C_CYAN), clr(C_RESET), clr(C_DIM), clr(C_RESET));
     printf("%sKernel-assisted dynamic analysis laboratory%s\n\n",
            clr(C_DIM), clr(C_RESET));
+    if (compatibility_check(kpm_version, sizeof(kpm_version)) < 0)
+        return 2;
+    printf("KPM: %s (API %d, Event ABI %d)\n", kpm_version,
+           DL_RPC_API_VERSION, DL_EVENT_ABI_VERSION);
     if (rpc("STATUS", reply, sizeof(reply)) < 0) {
         fprintf(stderr, "KPMDynaLab is not available at %s\n", CONTROL_PATH);
         return 1;

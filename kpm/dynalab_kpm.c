@@ -63,7 +63,7 @@ extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
 #define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.6.3-write-test");
+KPM_VERSION("0.6.4-protocol-test");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("YiJieqwq");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
@@ -92,6 +92,7 @@ static void (*fn_proc_remove)(struct proc_dir_entry *);
 static unsigned long long login_verifier;
 static int login_configured;
 static int authenticated_tgid = -1;
+static int hello_tgid = -1;
 static char control_reply[96] = "READY";
 static struct dl_wire_event event_ring[DL_EVENT_CAPACITY];
 static unsigned int event_head;
@@ -187,6 +188,20 @@ static int parse_decimal(const char *s, int *value)
         if (v < 0) return -1;
     }
     *value = v;
+    return 0;
+}
+
+static int parse_hello(const char *s, int *api, int *event_abi)
+{
+    int a = 0, e = 0;
+    if (!*s) return -1;
+    while (*s >= '0' && *s <= '9') a = a * 10 + (*s++ - '0');
+    if (*s++ != ' ') return -1;
+    if (!*s) return -1;
+    while (*s >= '0' && *s <= '9') e = e * 10 + (*s++ - '0');
+    if (*s) return -1;
+    *api = a;
+    *event_abi = e;
     return 0;
 }
 
@@ -288,7 +303,7 @@ static void add_event_for(unsigned short type, unsigned short action,
     int i = 0;
     struct dl_wire_event *e = &event_ring[seq % DL_EVENT_CAPACITY];
     e->magic = DL_EVENT_MAGIC;
-    e->version = DL_RPC_VERSION;
+    e->version = DL_EVENT_ABI_VERSION;
     e->type = type;
     e->action = action;
     e->reserved = 0;
@@ -349,6 +364,29 @@ static ssize_t control_write(struct file *file, const char __user *buf,
     cmd[count] = '\0';
     while (count && (cmd[count - 1] == '\n' || cmd[count - 1] == '\r'))
         cmd[--count] = '\0';
+
+    if (prefix(cmd, "HELLO ")) {
+        int cli_api, event_abi;
+        if (parse_hello(cmd + 6, &cli_api, &event_abi)) {
+            set_reply("ERR PROTOCOL");
+        } else if (cli_api < DL_RPC_MIN_CLI_API) {
+            set_reply("ERR CLI_OLD");
+        } else if (cli_api > DL_RPC_API_VERSION) {
+            set_reply("ERR KPM_OLD");
+        } else if (event_abi != DL_EVENT_ABI_VERSION) {
+            set_reply(event_abi > DL_EVENT_ABI_VERSION ?
+                      "ERR KPM_OLD" : "ERR CLI_OLD");
+        } else {
+            hello_tgid = current_id(1);
+            set_reply("OK HELLO 3 2 0.6.4-protocol-test");
+        }
+        return n;
+    }
+
+    if (hello_tgid != current_id(1)) {
+        set_reply("ERR CLI_OLD");
+        return n;
+    }
 
     if (streq(cmd, "STATUS")) {
         if (!login_configured) set_reply("UNINITIALIZED");
@@ -417,6 +455,7 @@ static ssize_t control_write(struct file *file, const char __user *buf,
         set_reply("OK CLEAR");
     } else if (streq(cmd, "LOGOUT")) {
         authenticated_tgid = -1;
+        hello_tgid = -1;
         set_reply("OK LOGOUT");
     } else {
         set_reply("ERR COMMAND");
@@ -754,6 +793,7 @@ static long dynalab_init(const char *args, const char *event, void *__user reser
     profile = DL_AUTO;
     state = DL_READY;
     authenticated_tgid = -1;
+    hello_tgid = -1;
     event_head = 0;
     clear_subjects();
     set_reply("UNINITIALIZED");
@@ -850,6 +890,7 @@ static long dynalab_ctl0(const char *args, char __user *out_msg, int outlen)
         state = DL_READY;
         profile = DL_AUTO;
         authenticated_tgid = -1;
+        hello_tgid = -1;
         event_head = 0;
         clear_subjects();
         set_reply(login_configured ? "READY AUTO OFF" : "UNINITIALIZED");
@@ -861,6 +902,7 @@ static long dynalab_ctl0(const char *args, char __user *out_msg, int outlen)
         state = DL_READY;
         profile = DL_AUTO;
         authenticated_tgid = -1;
+        hello_tgid = -1;
         event_head = 0;
         clear_subjects();
         login_verifier = 0;
@@ -877,6 +919,7 @@ static long dynalab_exit(void *__user reserved)
 {
     exit_procfs();
     authenticated_tgid = -1;
+    hello_tgid = -1;
     if (sym_reboot) unhook(sym_reboot);
     if (sym_fallocate) unhook(sym_fallocate);
     if (sym_ioctl) unhook(sym_ioctl);
