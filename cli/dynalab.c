@@ -197,7 +197,7 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    puts("KPMDynaLab CLI v0.4.1-test");
+    puts("KPMDynaLab CLI v0.4.2-test");
     if (rpc("STATUS", reply, sizeof(reply)) < 0) {
         fprintf(stderr, "KPMDynaLab is not available at %s\n", CONTROL_PATH);
         return 1;
@@ -254,6 +254,8 @@ int main(int argc, char **argv)
             pid = fork();
             if (pid == 0) {
                 execvp(run_argv[0], run_argv);
+                fprintf(stderr, "exec failed: %s: %s\n",
+                        run_argv[0], strerror(errno));
                 _exit(127);
             }
             if (pid < 0) {
@@ -261,7 +263,12 @@ int main(int argc, char **argv)
                 continue;
             }
             waitpid(pid, &status, 0);
-            printf("Target exited: status=%d\n", status);
+            if (WIFEXITED(status))
+                printf("Target exited: code=%d\n", WEXITSTATUS(status));
+            else if (WIFSIGNALED(status))
+                printf("Target killed: signal=%d\n", WTERMSIG(status));
+            else
+                printf("Target state: raw_status=%d\n", status);
             show_events();
         } else {
             puts("Unknown command; type 'help'.");
