@@ -41,6 +41,17 @@ typedef struct dl_hook_fargs4 hook_fargs1_t;
 typedef struct dl_hook_fargs4 hook_fargs2_t;
 typedef struct dl_hook_fargs4 hook_fargs3_t;
 typedef struct dl_hook_fargs4 hook_fargs4_t;
+struct dl_hook_fargs8 {
+    void *chain;
+    int skip_origin;
+    struct dl_hook_local local;
+    u64 ret;
+    union {
+        struct { u64 arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7; };
+        u64 args[8];
+    };
+} __attribute__((aligned(8)));
+typedef struct dl_hook_fargs8 hook_fargs5_t;
 
 extern int hook_wrap(void *func, int argc, void *before, void *after, void *udata);
 extern void unhook(void *func);
@@ -52,7 +63,7 @@ extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
 #define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.4.1-test");
+KPM_VERSION("0.5.0-test");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("Linuxnhe Developers");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
@@ -63,6 +74,7 @@ enum dl_state { DL_READY = 1, DL_CONFIGURED = 2, DL_SEALED = 3 };
 static int profile = DL_AUTO;
 static int state = DL_READY;
 static void *sym_write_iter, *sym_ioctl, *sym_fallocate, *sym_reboot;
+static void *sym_fork, *sym_exec, *sym_exit;
 static void (*fn_iov_iter_advance)(struct iov_iter *i, size_t bytes);
 static pid_t (*fn_task_pid_nr)(struct task_struct *task, int type,
                                struct pid_namespace *ns);
@@ -80,6 +92,19 @@ static int authenticated_tgid = -1;
 static char control_reply[96] = "READY";
 static struct dl_wire_event event_ring[DL_EVENT_CAPACITY];
 static unsigned int event_head;
+
+#define DL_MAX_SUBJECTS 256
+struct dl_subject {
+    int active;
+    int pid;
+    int tgid;
+    int parent_pid;
+    unsigned int session_id;
+    unsigned int scope;
+};
+static struct dl_subject subjects[DL_MAX_SUBJECTS];
+static unsigned int session_counter;
+static unsigned int active_session;
 
 
 static int streq(const char *a, const char *b)
@@ -149,6 +174,19 @@ static int parse_hex64(const char *s, unsigned long long *value)
     return 0;
 }
 
+static int parse_decimal(const char *s, int *value)
+{
+    int v = 0;
+    if (!*s) return -1;
+    while (*s) {
+        if (*s < '0' || *s > '9') return -1;
+        v = v * 10 + (*s++ - '0');
+        if (v < 0) return -1;
+    }
+    *value = v;
+    return 0;
+}
+
 static unsigned long long make_verifier(const char *s)
 {
     unsigned long long h = 1469598103934665603ULL;
@@ -165,30 +203,122 @@ static int current_id(int type)
     return fn_task_pid_nr(current, type, NULL);
 }
 
+static struct dl_subject *find_subject(int pid)
+{
+    int i;
+    for (i = 0; i < DL_MAX_SUBJECTS; i++)
+        if (subjects[i].active && subjects[i].pid == pid)
+            return &subjects[i];
+    return NULL;
+}
+
+static struct dl_subject *add_subject(int pid, int tgid, int parent_pid,
+                                      unsigned int sid, unsigned int scope)
+{
+    int i;
+    struct dl_subject *s = find_subject(pid);
+    if (s) return s;
+    for (i = 0; i < DL_MAX_SUBJECTS; i++) {
+        if (!subjects[i].active) {
+            subjects[i].active = 1;
+            subjects[i].pid = pid;
+            subjects[i].tgid = tgid;
+            subjects[i].parent_pid = parent_pid;
+            subjects[i].session_id = sid;
+            subjects[i].scope = scope;
+            return &subjects[i];
+        }
+    }
+    return NULL;
+}
+
+static void clear_subjects(void)
+{
+    int i;
+    for (i = 0; i < DL_MAX_SUBJECTS; i++)
+        subjects[i].active = 0;
+    active_session = 0;
+}
+
+static int active_subject_count(void)
+{
+    int i, n = 0;
+    for (i = 0; i < DL_MAX_SUBJECTS; i++)
+        if (subjects[i].active && subjects[i].session_id == active_session)
+            n++;
+    return n;
+}
+
+static void set_active_reply(void)
+{
+    char tmp[32];
+    int n = active_subject_count();
+    int pos = 0, start, end;
+    const char *p = "ACTIVE ";
+    while (*p) tmp[pos++] = *p++;
+    if (!n) tmp[pos++] = '0';
+    else {
+        start = pos;
+        while (n) { tmp[pos++] = '0' + n % 10; n /= 10; }
+        end = pos - 1;
+        while (start < end) {
+            char c = tmp[start]; tmp[start++] = tmp[end]; tmp[end--] = c;
+        }
+    }
+    tmp[pos] = '\0';
+    set_reply(tmp);
+}
+
 static int cli_authenticated(void)
 {
     return authenticated_tgid == current_id(1);
 }
 
-static void add_event(unsigned short type, unsigned short action,
-                      dev_t dev, unsigned long long offset,
-                      unsigned long long length, unsigned int command)
+static void add_event_for(unsigned short type, unsigned short action,
+                          int pid, int tgid, int parent_pid,
+                          dev_t dev, unsigned long long offset,
+                          unsigned long long length, unsigned int command,
+                          unsigned int sid, unsigned int scope,
+                          const char *name)
 {
     unsigned int seq = event_head++;
+    int i = 0;
     struct dl_wire_event *e = &event_ring[seq % DL_EVENT_CAPACITY];
     e->magic = DL_EVENT_MAGIC;
     e->version = DL_RPC_VERSION;
     e->type = type;
     e->action = action;
     e->reserved = 0;
-    e->pid = current_id(0);
-    e->tgid = current_id(1);
+    e->pid = pid;
+    e->tgid = tgid;
     e->major = MAJOR(dev);
     e->minor = MINOR(dev);
     e->offset = offset;
     e->length = length;
     e->command = command;
     e->sequence = seq + 1;
+    e->parent_pid = parent_pid;
+    e->session_id = sid;
+    e->scope = scope;
+    if (name) {
+        while (name[i] && i < (int)sizeof(e->name) - 1) {
+            e->name[i] = name[i];
+            i++;
+        }
+    }
+    e->name[i] = '\0';
+}
+
+static void add_event(unsigned short type, unsigned short action,
+                      dev_t dev, unsigned long long offset,
+                      unsigned long long length, unsigned int command)
+{
+    int pid = current_id(0);
+    struct dl_subject *s = find_subject(pid);
+    add_event_for(type, action, pid, current_id(1),
+                  s ? s->parent_pid : 0, dev, offset, length, command,
+                  s ? s->session_id : 0,
+                  s ? s->scope : DL_SCOPE_GLOBAL, NULL);
 }
 
 static ssize_t control_read(struct file *file, char __user *buf,
@@ -244,7 +374,25 @@ static ssize_t control_write(struct file *file, const char __user *buf,
         return -13;
     }
 
-    if (prefix(cmd, "PROFILE ")) {
+    if (streq(cmd, "ACTIVE")) {
+        set_active_reply();
+    } else if (prefix(cmd, "TARGET ")) {
+        int target_pid;
+        if (state == DL_SEALED) { set_reply("ERR SEALED"); return -1; }
+        if (parse_decimal(cmd + 7, &target_pid)) {
+            set_reply("ERR TARGET");
+            return -22;
+        }
+        clear_subjects();
+        active_session = ++session_counter;
+        if (!active_session) active_session = ++session_counter;
+        if (!add_subject(target_pid, target_pid, current_id(0),
+                         active_session, DL_SCOPE_TARGET)) {
+            set_reply("ERR SUBJECTS");
+            return -12;
+        }
+        set_reply("OK TARGET");
+    } else if (prefix(cmd, "PROFILE ")) {
         if (state == DL_SEALED) { set_reply("ERR SEALED"); return -1; }
         if (streq(cmd + 8, "auto")) profile = DL_AUTO;
         else if (streq(cmd + 8, "trace")) profile = DL_TRACE;
@@ -259,6 +407,7 @@ static ssize_t control_write(struct file *file, const char __user *buf,
     } else if (streq(cmd, "STOP")) {
         state = DL_READY;
         profile = DL_AUTO;
+        clear_subjects();
         set_reply("OK STOP");
     } else if (streq(cmd, "CLEAR")) {
         event_head = 0;
@@ -304,6 +453,46 @@ static int simulate_dangerous(void)
 {
     /* Analysis policy becomes active only after the manager seals it. */
     return state == DL_SEALED && profile != DL_TRACE;
+}
+
+static void before_fork(hook_fargs1_t *args, void *udata)
+{
+    struct task_struct *child = (struct task_struct *)args->arg0;
+    int parent_pid = current_id(0);
+    int child_pid, child_tgid;
+    struct dl_subject *parent;
+    if (!child) return;
+    parent = find_subject(parent_pid);
+    if (!parent) return;
+    child_pid = fn_task_pid_nr(child, 0, NULL);
+    child_tgid = fn_task_pid_nr(child, 1, NULL);
+    add_subject(child_pid, child_tgid, parent_pid,
+                parent->session_id, DL_SCOPE_DESCENDANT);
+    add_event_for(DL_WIRE_FORK, DL_WIRE_PASS, child_pid, child_tgid,
+                  parent_pid, 0, 0, 0, 0, parent->session_id,
+                  DL_SCOPE_DESCENDANT, NULL);
+}
+
+static void before_exec(hook_fargs5_t *args, void *udata)
+{
+    struct filename *filename = (struct filename *)args->arg1;
+    int pid = current_id(0);
+    struct dl_subject *s = find_subject(pid);
+    if (!s) return;
+    add_event_for(DL_WIRE_EXEC, DL_WIRE_PASS, pid, current_id(1),
+                  s->parent_pid, 0, 0, 0, 0, s->session_id, s->scope,
+                  filename ? filename->name : NULL);
+}
+
+static void before_exit(hook_fargs1_t *args, void *udata)
+{
+    int pid = current_id(0);
+    struct dl_subject *s = find_subject(pid);
+    if (!s) return;
+    add_event_for(DL_WIRE_EXIT, DL_WIRE_PASS, pid, current_id(1),
+                  s->parent_pid, 0, 0, (unsigned long long)args->arg0,
+                  0, s->session_id, s->scope, NULL);
+    s->active = 0;
 }
 
 static void before_blkdev_write_iter(hook_fargs2_t *args, void *udata)
@@ -454,6 +643,7 @@ static long dynalab_init(const char *args, const char *event, void *__user reser
     state = DL_READY;
     authenticated_tgid = -1;
     event_head = 0;
+    clear_subjects();
     set_reply("UNINITIALIZED");
     dl_log("init event=%s default=AUTO state=READY\n", event ? event : "?");
 
@@ -464,6 +654,12 @@ static long dynalab_init(const char *args, const char *event, void *__user reser
         return -2;
     }
 
+    rc = install_one("wake_up_new_task", 1, before_fork, &sym_fork);
+    if (rc) goto fail;
+    rc = install_one("do_execveat_common", 5, before_exec, &sym_exec);
+    if (rc) goto fail;
+    rc = install_one("do_exit", 1, before_exit, &sym_exit);
+    if (rc) goto fail;
     rc = install_one("blkdev_write_iter", 2, before_blkdev_write_iter, &sym_write_iter);
     if (rc) goto fail;
     rc = install_one("blkdev_ioctl", 3, before_blkdev_ioctl, &sym_ioctl);
@@ -483,7 +679,11 @@ fail:
     if (sym_fallocate) unhook(sym_fallocate);
     if (sym_ioctl) unhook(sym_ioctl);
     if (sym_write_iter) unhook(sym_write_iter);
+    if (sym_exit) unhook(sym_exit);
+    if (sym_exec) unhook(sym_exec);
+    if (sym_fork) unhook(sym_fork);
     sym_reboot = sym_fallocate = sym_ioctl = sym_write_iter = NULL;
+    sym_exit = sym_exec = sym_fork = NULL;
     return rc;
 }
 
@@ -526,6 +726,7 @@ static long dynalab_ctl0(const char *args, char __user *out_msg, int outlen)
         profile = DL_AUTO;
         authenticated_tgid = -1;
         event_head = 0;
+        clear_subjects();
         set_reply(login_configured ? "READY AUTO OFF" : "UNINITIALIZED");
         dl_log("manager reset session\n");
         return ctl_reply(out_msg, outlen, "OK RESET");
@@ -536,6 +737,7 @@ static long dynalab_ctl0(const char *args, char __user *out_msg, int outlen)
         profile = DL_AUTO;
         authenticated_tgid = -1;
         event_head = 0;
+        clear_subjects();
         login_verifier = 0;
         login_configured = 0;
         set_reply("UNINITIALIZED");
@@ -554,6 +756,9 @@ static long dynalab_exit(void *__user reserved)
     if (sym_fallocate) unhook(sym_fallocate);
     if (sym_ioctl) unhook(sym_ioctl);
     if (sym_write_iter) unhook(sym_write_iter);
+    if (sym_exit) unhook(sym_exit);
+    if (sym_exec) unhook(sym_exec);
+    if (sym_fork) unhook(sym_fork);
     dl_log("unloaded\n");
     return 0;
 }

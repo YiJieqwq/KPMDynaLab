@@ -91,6 +91,9 @@ static const char *event_name(unsigned int type)
     case DL_WIRE_BLOCK_IOCTL: return "BLOCK_IOCTL";
     case DL_WIRE_BLOCK_FALLOCATE: return "BLOCK_FALLOCATE";
     case DL_WIRE_REBOOT: return "REBOOT";
+    case DL_WIRE_FORK: return "FORK";
+    case DL_WIRE_EXEC: return "EXEC";
+    case DL_WIRE_EXIT: return "EXIT";
     default: return "UNKNOWN";
     }
 }
@@ -117,9 +120,11 @@ static int show_events(void)
     while ((n = read(fd, &e, sizeof(e))) == (ssize_t)sizeof(e)) {
         if (e.magic != DL_EVENT_MAGIC || e.version != DL_RPC_VERSION)
             continue;
-        printf("#%-5u %-16s pid=%-6u dev=%u:%u off=%llu len=%llu cmd=0x%x %-8s\n",
-               e.sequence, event_name(e.type), e.pid, e.major, e.minor,
-               e.offset, e.length, e.command, action_name(e.action));
+        printf("#%-5u s=%-3u %-16s pid=%-6u ppid=%-6u dev=%u:%u "
+               "off=%llu len=%llu cmd=0x%x %-8s %s\n",
+               e.sequence, e.session_id, event_name(e.type), e.pid,
+               e.parent_pid, e.major, e.minor, e.offset, e.length,
+               e.command, action_name(e.action), e.name);
     }
     close(fd);
     return n < 0 ? 1 : 0;
@@ -129,6 +134,7 @@ static void help(void)
 {
     puts("Commands:");
     puts("  status                 show KPM state");
+    puts("  active                 show active target/descendant count");
     puts("  profile auto|trace|expert");
     puts("  seal                   activate selected profile");
     puts("  stop                   authenticated stop/reset");
@@ -148,7 +154,7 @@ static int send_and_print(const char *cmd)
         return 1;
     }
     puts(reply[0] ? reply : "OK");
-    return 0;
+    return !strncmp(reply, "ERR", 3);
 }
 
 static int login(void)
@@ -197,7 +203,7 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    puts("KPMDynaLab CLI v0.4.2-test");
+    puts("KPMDynaLab CLI v0.5.0-test");
     if (rpc("STATUS", reply, sizeof(reply)) < 0) {
         fprintf(stderr, "KPMDynaLab is not available at %s\n", CONTROL_PATH);
         return 1;
@@ -224,6 +230,8 @@ int main(int argc, char **argv)
             help();
         } else if (!strcmp(cmd, "status")) {
             send_and_print("STATUS");
+        } else if (!strcmp(cmd, "active")) {
+            send_and_print("ACTIVE");
         } else if (!strcmp(cmd, "profile") && arg) {
             char rpc_cmd[64];
             snprintf(rpc_cmd, sizeof(rpc_cmd), "PROFILE %s", arg);
@@ -239,10 +247,10 @@ int main(int argc, char **argv)
         } else if (!strcmp(cmd, "run") && arg) {
             pid_t pid;
             char *run_argv[64];
-            int n = 0, status;
+            int n = 0, status, gate[2], active = 0;
             char *tok;
-            if (send_and_print("SEAL"))
-                continue;
+            char target_cmd[64], workdir[128], answer[16];
+
             tok = strtok(arg, " \t");
             while (tok && n < 63) {
                 run_argv[n++] = tok;
@@ -251,17 +259,51 @@ int main(int argc, char **argv)
             run_argv[n] = NULL;
             if (!n)
                 continue;
+            if (pipe(gate) < 0) {
+                perror("pipe");
+                continue;
+            }
             pid = fork();
             if (pid == 0) {
+                char go;
+                close(gate[1]);
+                if (read(gate[0], &go, 1) != 1)
+                    _exit(126);
+                close(gate[0]);
+                snprintf(workdir, sizeof(workdir),
+                         "/data/local/tmp/dynalab-run-%d", getpid());
+                setenv("DYNALAB_WORKDIR", workdir, 1);
                 execvp(run_argv[0], run_argv);
                 fprintf(stderr, "exec failed: %s: %s\n",
                         run_argv[0], strerror(errno));
                 _exit(127);
             }
+            close(gate[0]);
             if (pid < 0) {
+                close(gate[1]);
                 perror("fork");
                 continue;
             }
+            snprintf(workdir, sizeof(workdir),
+                     "/data/local/tmp/dynalab-run-%d", pid);
+            if (mkdir(workdir, 0700) < 0 && errno != EEXIST) {
+                perror("mkdir workdir");
+                kill(pid, SIGKILL);
+                close(gate[1]);
+                waitpid(pid, NULL, 0);
+                continue;
+            }
+            snprintf(target_cmd, sizeof(target_cmd), "TARGET %d", pid);
+            if (send_and_print(target_cmd) || send_and_print("SEAL")) {
+                kill(pid, SIGKILL);
+                close(gate[1]);
+                waitpid(pid, NULL, 0);
+                continue;
+            }
+            if (write(gate[1], "G", 1) != 1)
+                perror("release target");
+            close(gate[1]);
+
             waitpid(pid, &status, 0);
             if (WIFEXITED(status))
                 printf("Target exited: code=%d\n", WEXITSTATUS(status));
@@ -270,6 +312,35 @@ int main(int argc, char **argv)
             else
                 printf("Target state: raw_status=%d\n", status);
             show_events();
+
+            if (!rpc("ACTIVE", reply, sizeof(reply)))
+                sscanf(reply, "ACTIVE %d", &active);
+            if (active > 0) {
+                printf("%d descendant(s) still active; session remains SEALED.\n",
+                       active);
+                printf("Artifacts preserved until descendants exit: %s\n", workdir);
+                continue;
+            }
+
+            printf("Cleanup session workdir %s? [Y/n] ", workdir);
+            fflush(stdout);
+            if (!fgets(answer, sizeof(answer), stdin) ||
+                answer[0] == '\n' || answer[0] == 'y' || answer[0] == 'Y') {
+                pid_t cleaner = fork();
+                if (cleaner == 0) {
+                    execl("/system/bin/rm", "rm", "-rf", "--", workdir,
+                          (char *)NULL);
+                    _exit(127);
+                }
+                if (cleaner > 0) {
+                    waitpid(cleaner, &status, 0);
+                    printf("Cleanup: %s\n",
+                           WIFEXITED(status) && WEXITSTATUS(status) == 0 ?
+                           "OK" : "FAILED");
+                }
+            } else {
+                printf("Artifacts preserved: %s\n", workdir);
+            }
         } else {
             puts("Unknown command; type 'help'.");
         }

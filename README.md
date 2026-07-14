@@ -27,11 +27,11 @@ KPMDynaLab hooks at the **block layer** — 4 layers below libc — where no use
 app → libc → syscall → VFS → blkdev_open ← KPMDynaLab inline hook
 ```
 
-## CLI Test Build (v0.4.0-test)
+## Process Session Test Build (v0.5.0-test)
 
-The first authenticated static ARM64 CLI is available for **Android 16 / Linux 6.12.23 / 4 KiB pages**. Manager CTL0 is restricted to credential setup, status, and emergency reset. Normal profile selection, sealing, event viewing, target execution, and stop operations use `/proc/dynalab/control` through the logged-in CLI.
+v0.5 adds target registration before exec, analysis session IDs, fork/exec/exit events, descendant inheritance, and CLI-managed per-run work directories with optional cleanup. The CLI blocks the freshly forked child until KPM acknowledges `TARGET <pid>` and the selected profile is SEALED.
 
-The KPM hooks `blkdev_write_iter`, `blkdev_ioctl`, `blkdev_fallocate`, and `__arm64_sys_reboot`. AUTO simulates dangerous block operations; TRACE passes them through.
+The included self-extracting smoke sample creates two script stages, executes them, performs a simulated loop-device write, and intentionally leaves artifacts for the CLI cleanup prompt.
 
 Build:
 
@@ -40,11 +40,11 @@ make cli
 make kpm KDIR=/path/to/prepared/android16-6.12
 ```
 
-Follow [the CLI device test guide](docs/CLI_TEST.md). Start with the loop-backed smoke test, not a real partition.
+Follow [the v0.5 process-session test guide](docs/V05_TEST.md).
 
 ## Development Status
 
-> **v0.4 CLI prototype:** password/verifier setup through trusted CTL0, root-only procfs RPC, TGID-bound CLI login, TRACE/AUTO/EXPERT selection, SEALED state, a 256-record binary event ring, event display, and `run` are implemented. Process lineage, file-drop tracing, shadow readback, final challenge/HMAC authentication, interactive expert breakpoints, and Flag Challenge remain future work.
+> **v0.5 process-session prototype:** authenticated CLI control, target-before-exec registration, FORK/EXEC/EXIT events, session and parent identifiers, global block simulation, active-descendant counting, and dedicated-workdir cleanup are implemented. File-operation hooks, reliable concurrent event commits, persistent hidden RPC, shadow readback, final challenge/HMAC authentication, expert breakpoints, and Flag Challenge remain future work.
 
 ```bash
 make test
