@@ -36,7 +36,7 @@
 #define KPM_NAME        "KPMDynaLab"
 #define KPM_VERSION     "v1.0.0"
 #define KPM_LICENSE     "GPL-2.0"
-#define KPM_AUTHOR      "Linuxnhe Developers"
+#define KPM_AUTHOR      "YiJieqwq"
 #define KPM_DESC        "Kernel-level Dynamic Analysis Lab for bricker malware"
 
 /* ---- procfs ---- */

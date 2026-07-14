@@ -162,7 +162,7 @@ make
 
 ## Authors
 
-- **Linuxnhe Developers** ([@YiJieqwq](https://github.com/YiJieqwq))
+- **YiJieqwq** ([@YiJieqwq](https://github.com/YiJieqwq))
 
 ## License
 
