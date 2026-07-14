@@ -282,7 +282,7 @@ int main(int argc, char **argv)
     }
 
     use_color = isatty(STDOUT_FILENO) && getenv("NO_COLOR") == NULL;
-    printf("%s%sKPMDynaLab%s %sv0.7.0-test%s\n",
+    printf("%s%sKPMDynaLab%s %sv0.7.1-test%s\n",
            clr(C_BOLD), clr(C_CYAN), clr(C_RESET), clr(C_DIM), clr(C_RESET));
     printf("%sKernel-assisted dynamic analysis laboratory%s\n\n",
            clr(C_DIM), clr(C_RESET));
@@ -295,6 +295,13 @@ int main(int argc, char **argv)
         return 1;
     }
     printf("Kernel: %s\n", reply);
+    if (!strcmp(reply, "UNINITIALIZED")) {
+        fprintf(stderr,
+                "No login password is configured. Set it in Manager > KPMDynaLab > Control first.\n");
+        fprintf(stderr,
+                "Run 'dynalab verifier' to generate a SETVER command.\n");
+        return 3;
+    }
     if (login() < 0)
         return 1;
 
