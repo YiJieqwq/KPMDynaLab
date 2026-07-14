@@ -268,6 +268,7 @@ int main(int argc, char **argv)
             puts("Unknown command; type 'help'.");
         }
     }
+    rpc("LOGOUT", reply, sizeof(reply));
     memset(line, 0, sizeof(line));
     return 0;
 }
