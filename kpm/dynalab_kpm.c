@@ -63,7 +63,7 @@ extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
 #define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.6.2-open-create-test");
+KPM_VERSION("0.6.3-write-test");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("YiJieqwq");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
@@ -544,8 +544,11 @@ static void before_vfs_write(hook_fargs4_t *args, void *udata)
     int pid = current_id(0);
     struct dl_subject *s = find_subject(pid);
     struct file *file = (struct file *)args->arg0;
+    struct inode *inode;
     loff_t *pos = (loff_t *)args->arg3;
     if (!s || !file) return;
+    inode = file_inode(file);
+    if (!inode || !S_ISREG(inode->i_mode)) return;
     add_event_for(DL_WIRE_FILE_WRITE, DL_WIRE_PASS, pid, current_id(1),
                   s->parent_pid, 0, pos ? *pos : 0, args->arg2, 0,
                   s->session_id, s->scope,
@@ -771,6 +774,8 @@ static long dynalab_init(const char *args, const char *event, void *__user reser
     if (rc) goto fail;
     rc = install_one_after("do_filp_open", 3, after_do_filp_open,
                            &sym_do_filp_open);
+    if (rc) goto fail;
+    rc = install_one("vfs_write", 4, before_vfs_write, &sym_vfs_write);
     if (rc) goto fail;
     /* Remaining file hooks stay staged after the v0.6.0 unlink panic. */
     rc = install_one("blkdev_write_iter", 2, before_blkdev_write_iter, &sym_write_iter);
