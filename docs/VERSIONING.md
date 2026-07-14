@@ -39,12 +39,10 @@ The CLI refuses to prompt for a login password or issue analysis commands until 
 
 Compatibility policy is deliberately strict during development: Event ABI must match exactly. RPC API can later support a negotiated range, but the current KPM requires CLI API 3 and exposes API 3.
 
-User-facing CLI diagnostics include both English and Chinese:
+User-facing CLI diagnostics distinguish absence from incompatibility:
 
 ```text
-KPM component is too old; update required.
-KPM组件版本过旧，需要更新KPM。
-
-CLI component is too old; update required.
-CLI组件版本过旧，需要更新CLI。
+KPM component is not loaded. Load KPMDynaLab first.
+KPM component is outdated. Update the KPM component.
+CLI component is outdated. Update the CLI.
 ```

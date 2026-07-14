@@ -106,14 +106,29 @@ static int compatibility_check(char *kpm_version, size_t size)
     snprintf(command, sizeof(command), "HELLO %d %d",
              DL_RPC_API_VERSION, DL_EVENT_ABI_VERSION);
     rc = rpc(command, reply, sizeof(reply));
-    if (rc < 0 || !strncmp(reply, "ERR KPM_OLD", 11)) {
-        fprintf(stderr, "KPM component is too old; update required.\n");
-        fprintf(stderr, "KPM组件版本过旧，需要更新KPM。\n");
+    if (rc == -ENOENT || rc == -ENODEV) {
+        fprintf(stderr, "KPM component is not loaded. Load KPMDynaLab first.\n");
+        return -1;
+    }
+    if (rc == -EACCES && geteuid() != 0) {
+        fprintf(stderr, "Permission denied. Run the CLI as root.\n");
+        return -1;
+    }
+    if (rc < 0) {
+        if (rc == -EACCES || rc == -EPERM || rc == -EINVAL) {
+            fprintf(stderr, "KPM component is outdated. Update the KPM component.\n");
+        } else {
+            fprintf(stderr, "KPM communication failed: %s (%d)\n",
+                    strerror(-rc), rc);
+        }
+        return -1;
+    }
+    if (!strncmp(reply, "ERR KPM_OLD", 11)) {
+        fprintf(stderr, "KPM component is outdated. Update the KPM component.\n");
         return -1;
     }
     if (!strncmp(reply, "ERR CLI_OLD", 11)) {
-        fprintf(stderr, "CLI component is too old; update required.\n");
-        fprintf(stderr, "CLI组件版本过旧，需要更新CLI。\n");
+        fprintf(stderr, "CLI component is outdated. Update the CLI.\n");
         return -1;
     }
     if (sscanf(reply, "OK HELLO %d %d %63s", &kpm_api, &event_abi,
@@ -123,8 +138,7 @@ static int compatibility_check(char *kpm_version, size_t size)
     }
     if (kpm_api < DL_RPC_API_VERSION ||
         event_abi != DL_EVENT_ABI_VERSION) {
-        fprintf(stderr, "KPM component is too old; update required.\n");
-        fprintf(stderr, "KPM组件版本过旧，需要更新KPM。\n");
+        fprintf(stderr, "KPM component is outdated. Update the KPM component.\n");
         return -1;
     }
     snprintf(kpm_version, size, "%s", version);
@@ -264,7 +278,7 @@ int main(int argc, char **argv)
     }
 
     use_color = isatty(STDOUT_FILENO) && getenv("NO_COLOR") == NULL;
-    printf("%s%sKPMDynaLab%s %sv0.6.4-test%s\n",
+    printf("%s%sKPMDynaLab%s %sv0.6.5-test%s\n",
            clr(C_BOLD), clr(C_CYAN), clr(C_RESET), clr(C_DIM), clr(C_RESET));
     printf("%sKernel-assisted dynamic analysis laboratory%s\n\n",
            clr(C_DIM), clr(C_RESET));
