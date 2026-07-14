@@ -63,7 +63,7 @@ extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
 #define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.6.0-test");
+KPM_VERSION("0.6.1-create-test");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("YiJieqwq");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
@@ -739,16 +739,7 @@ static long dynalab_init(const char *args, const char *event, void *__user reser
     if (rc) goto fail;
     rc = install_one("vfs_create", 5, before_vfs_create, &sym_vfs_create);
     if (rc) goto fail;
-    rc = install_one("vfs_mkdir", 4, before_vfs_mkdir, &sym_vfs_mkdir);
-    if (rc) goto fail;
-    rc = install_one("vfs_write", 4, before_vfs_write, &sym_vfs_write);
-    if (rc) goto fail;
-    rc = install_one("notify_change", 4, before_notify_change, &sym_notify_change);
-    if (rc) goto fail;
-    rc = install_one("vfs_unlink", 4, before_vfs_unlink, &sym_vfs_unlink);
-    if (rc) goto fail;
-    rc = install_one("vfs_truncate", 2, before_vfs_truncate, &sym_vfs_truncate);
-    if (rc) goto fail;
+    /* File hooks are staged after a v0.6.0 panic in before_vfs_unlink. */
     rc = install_one("blkdev_write_iter", 2, before_blkdev_write_iter, &sym_write_iter);
     if (rc) goto fail;
     rc = install_one("blkdev_ioctl", 3, before_blkdev_ioctl, &sym_ioctl);
