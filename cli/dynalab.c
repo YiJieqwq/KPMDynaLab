@@ -69,11 +69,10 @@ static int rpc(const char *command, char *reply, size_t reply_size)
         close(fd);
         return -e;
     }
-    if (lseek(fd, 0, SEEK_SET) < 0) {
-        int e = errno;
-        close(fd);
-        return -e;
-    }
+    close(fd);
+    fd = open(CONTROL_PATH, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return -errno;
     n = read(fd, reply, reply_size - 1);
     if (n < 0) {
         int e = errno;
@@ -198,7 +197,7 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    puts("KPMDynaLab CLI v0.4.0-test");
+    puts("KPMDynaLab CLI v0.4.1-test");
     if (rpc("STATUS", reply, sizeof(reply)) < 0) {
         fprintf(stderr, "KPMDynaLab is not available at %s\n", CONTROL_PATH);
         return 1;
