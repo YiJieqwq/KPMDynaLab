@@ -18,6 +18,7 @@
 
 #define CONTROL_PATH "/proc/dynalab/control"
 #define EVENTS_PATH  "/proc/dynalab/events"
+#define BLG_VAULT    "/data/adb/dynalab/blg-recovery-pack"
 #define MAX_LINE 512
 
 static int use_color;
@@ -207,6 +208,119 @@ static int show_events(void)
     return n < 0 ? 1 : 0;
 }
 
+static int run_shell(const char *script)
+{
+    int status;
+    pid_t pid = fork();
+    if (pid == 0) {
+        execl("/system/bin/sh", "sh", "-c", script, (char *)NULL);
+        _exit(127);
+    }
+    if (pid < 0) {
+        perror("fork");
+        return 1;
+    }
+    if (waitpid(pid, &status, 0) < 0) {
+        perror("waitpid");
+        return 1;
+    }
+    return !(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+}
+
+static int blg_pack_present(void)
+{
+    return access(BLG_VAULT "/manifest.sha256", R_OK) == 0;
+}
+
+static int blg_pack_create(void)
+{
+    static const char script[] =
+        "set -eu\n"
+        "V='" BLG_VAULT "'\n"
+        "N=\"${V}.new.$$\"\n"
+        "O=\"${V}.old\"\n"
+        "trap 'rm -rf \"$N\"' EXIT\n"
+        "mkdir -p \"$N/images\"\n"
+        "COUNT=0\n"
+        "for P in xbl_a xbl_b xbl_config_a xbl_config_b abl_a abl_b "
+        "devcfg_a devcfg_b ocdt ocdt_a ocdt_b; do\n"
+        "  D=\"/dev/block/by-name/$P\"\n"
+        "  [ -b \"$D\" ] || continue\n"
+        "  S=$(blockdev --getsize64 \"$D\")\n"
+        "  [ \"$S\" -gt 0 ] && [ \"$S\" -le 67108864 ] || { "
+        "echo \"Skipping unsafe size: $P ($S bytes)\"; continue; }\n"
+        "  echo \"  extracting $P ($S bytes)\"\n"
+        "  dd if=\"$D\" of=\"$N/images/$P.img\" bs=1048576 status=none\n"
+        "  COUNT=$((COUNT + 1))\n"
+        "done\n"
+        "[ \"$COUNT\" -gt 0 ] || { echo 'No supported boot-chain partitions found.'; exit 4; }\n"
+        "{\n"
+        "  echo 'format=KPMDynaLab-BLG-Pack'\n"
+        "  echo 'format_version=1'\n"
+        "  echo \"created_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)\"\n"
+        "  echo \"product=$(getprop ro.product.device)\"\n"
+        "  echo \"hardware=$(getprop ro.hardware)\"\n"
+        "  echo \"slot=$(getprop ro.boot.slot_suffix)\"\n"
+        "  echo \"kernel=$(uname -r)\"\n"
+        "  echo \"image_count=$COUNT\"\n"
+        "} > \"$N/device.txt\"\n"
+        "(cd \"$N\" && sha256sum images/*.img > manifest.sha256)\n"
+        "(cd \"$N\" && sha256sum -c manifest.sha256)\n"
+        "sync\n"
+        "rm -rf \"$O\"\n"
+        "[ ! -e \"$V\" ] || mv \"$V\" \"$O\"\n"
+        "mv \"$N\" \"$V\"\n"
+        "trap - EXIT\n"
+        "sync\n"
+        "echo \"Recovery Pack created: $V\"\n"
+        "du -sh \"$V\" 2>/dev/null || true\n";
+
+    puts("Creating a device-local BLG Recovery Pack...");
+    puts("This v0.8.0 milestone only extracts and verifies images; it cannot flash them.");
+    return run_shell(script);
+}
+
+static int blg_pack_verify(void)
+{
+    static const char script[] =
+        "set -eu\n"
+        "V='" BLG_VAULT "'\n"
+        "[ -r \"$V/manifest.sha256\" ]\n"
+        "cd \"$V\"\n"
+        "sha256sum -c manifest.sha256\n"
+        "echo 'Recovery Pack: VERIFIED'\n";
+    return run_shell(script);
+}
+
+static void blg_pack_status(void)
+{
+    if (!blg_pack_present()) {
+        puts("Boot Lifeguard: NO RECOVERY PACK");
+        return;
+    }
+    printf("Boot Lifeguard Recovery Pack: %s\n", BLG_VAULT);
+    run_shell("cat '" BLG_VAULT "/device.txt' 2>/dev/null || true; "
+              "du -sh '" BLG_VAULT "' 2>/dev/null || true");
+    puts("RAM Cache: NOT IMPLEMENTED IN THIS MILESTONE");
+}
+
+static void blg_first_run_prompt(void)
+{
+    char answer[16];
+    if (blg_pack_present()) return;
+    puts("\nBoot Lifeguard is not configured.");
+    puts("A device-local Recovery Pack is required for future emergency recovery.");
+    printf("Create Recovery Pack now? [Y/n] ");
+    fflush(stdout);
+    if (!fgets(answer, sizeof(answer), stdin) || answer[0] == '\n' ||
+        answer[0] == 'y' || answer[0] == 'Y') {
+        if (blg_pack_create())
+            puts("Recovery Pack creation failed. Use 'blg pack create' to retry.");
+    } else {
+        puts("Skipped. Use 'blg pack create' later.");
+    }
+}
+
 static void help(void)
 {
     puts("Commands:");
@@ -216,7 +330,10 @@ static void help(void)
     puts("  seal                   activate selected profile");
     puts("  stop                   authenticated stop/reset");
     puts("  events                 dump kernel event ring");
-    puts("  clear                  clear event ring");
+    puts("  blg status             show Recovery Pack status");
+    puts("  blg pack create        extract and verify a Recovery Pack");
+    puts("  blg pack verify        verify Recovery Pack hashes");
+    puts("  clear                  clear event ring (not while SEALED)");
     puts("  run <program> [args]   seal and execute target");
     puts("  help");
     puts("  exit");
@@ -282,7 +399,7 @@ int main(int argc, char **argv)
     }
 
     use_color = isatty(STDOUT_FILENO) && getenv("NO_COLOR") == NULL;
-    printf("%s%sKPMDynaLab%s %sv0.7.1-test%s\n",
+    printf("%s%sKPMDynaLab%s %sv0.8.0-pack-test%s\n",
            clr(C_BOLD), clr(C_CYAN), clr(C_RESET), clr(C_DIM), clr(C_RESET));
     printf("%sKernel-assisted dynamic analysis laboratory%s\n\n",
            clr(C_DIM), clr(C_RESET));
@@ -304,6 +421,7 @@ int main(int argc, char **argv)
     }
     if (login() < 0)
         return 1;
+    blg_first_run_prompt();
 
     while (1) {
         char *cmd, *arg;
@@ -349,6 +467,15 @@ int main(int argc, char **argv)
             send_and_print("STOP");
         } else if (!strcmp(cmd, "events")) {
             show_events();
+        } else if (!strcmp(cmd, "blg") && arg) {
+            if (!strcmp(arg, "status"))
+                blg_pack_status();
+            else if (!strcmp(arg, "pack create"))
+                blg_pack_create();
+            else if (!strcmp(arg, "pack verify"))
+                blg_pack_verify();
+            else
+                puts("Usage: blg status | blg pack create | blg pack verify");
         } else if (!strcmp(cmd, "clear")) {
             send_and_print("CLEAR");
         } else if (!strcmp(cmd, "run") && arg) {
