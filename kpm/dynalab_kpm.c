@@ -63,7 +63,7 @@ extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
 #define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.8.2-efisp-guard-test");
+KPM_VERSION("0.8.3-ram-cache-test");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("YiJieqwq");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
@@ -80,12 +80,21 @@ static void *sym_do_filp_open;
 static void *sym_do_mkdirat;
 static void *sym_notify_change, *sym_vfs_unlink, *sym_vfs_truncate;
 static void (*fn_iov_iter_advance)(struct iov_iter *i, size_t bytes);
+static unsigned long (*fn_copy_from_user)(void *to, const void __user *from,
+                                          unsigned long n);
+static void *(*fn_vmalloc)(unsigned long size);
+static void (*fn_vfree)(const void *addr);
 static int (*fn_kern_path)(const char *name, unsigned int flags, struct path *path);
 static void (*fn_path_put)(const struct path *path);
 static pid_t (*fn_task_pid_nr)(struct task_struct *task, int type,
                                struct pid_namespace *ns);
 
-static struct proc_dir_entry *proc_dir, *proc_control, *proc_events;
+static struct proc_dir_entry *proc_dir, *proc_control, *proc_events, *proc_cache;
+#define DL_BLG_CACHE_MAX (256UL * 1024UL * 1024UL)
+static void *blg_cache;
+static unsigned long blg_cache_size;
+static unsigned long blg_cache_written;
+static int blg_cache_ready;
 static struct proc_dir_entry *(*fn_proc_mkdir)(const char *, struct proc_dir_entry *);
 static struct proc_dir_entry *(*fn_proc_create)(const char *, umode_t,
                                                 struct proc_dir_entry *,
@@ -222,6 +231,20 @@ static int parse_dev_pair(const char *s, unsigned int *major, unsigned int *mino
     if (*s || a > 0xfff || b > 0xfffff) return -1;
     *major = a;
     *minor = b;
+    return 0;
+}
+
+static int parse_ulong(const char *s, unsigned long *value)
+{
+    unsigned long v = 0, next;
+    if (!*s) return -1;
+    while (*s) {
+        if (*s < '0' || *s > '9') return -1;
+        next = v * 10 + (*s++ - '0');
+        if (next < v) return -1;
+        v = next;
+    }
+    *value = v;
     return 0;
 }
 
@@ -404,7 +427,7 @@ static ssize_t control_write(struct file *file, const char __user *buf,
                       "ERR KPM_OLD" : "ERR CLI_OLD");
         } else {
             hello_tgid = current_id(1);
-            set_reply("OK HELLO 5 2 0.8.2-efisp-guard-test");
+            set_reply("OK HELLO 6 2 0.8.3-ram-cache-test");
         }
         return n;
     }
@@ -445,7 +468,47 @@ static ssize_t control_write(struct file *file, const char __user *buf,
         return -13;
     }
 
-    if (streq(cmd, "EFISP STATUS")) {
+    if (prefix(cmd, "BLG CACHE BEGIN ")) {
+        unsigned long size;
+        if (state == DL_SEALED) { set_reply("ERR SEALED"); return -1; }
+        if (parse_ulong(cmd + 16, &size) || !size || size > DL_BLG_CACHE_MAX) {
+            set_reply("ERR CACHE SIZE");
+            return -22;
+        }
+        if (!fn_vmalloc || !fn_vfree || !fn_copy_from_user) {
+            set_reply("ERR CACHE API");
+            return -38;
+        }
+        if (blg_cache) fn_vfree(blg_cache);
+        blg_cache = fn_vmalloc(size);
+        if (!blg_cache) {
+            blg_cache_size = blg_cache_written = 0;
+            blg_cache_ready = 0;
+            set_reply("ERR CACHE MEMORY");
+            return -12;
+        }
+        blg_cache_size = size;
+        blg_cache_written = 0;
+        blg_cache_ready = 0;
+        set_reply("OK CACHE BEGIN");
+    } else if (streq(cmd, "BLG CACHE COMMIT")) {
+        if (!blg_cache || blg_cache_written != blg_cache_size) {
+            set_reply("ERR CACHE INCOMPLETE");
+            return -22;
+        }
+        blg_cache_ready = 1;
+        set_reply("OK CACHE READY");
+    } else if (streq(cmd, "BLG CACHE STATUS")) {
+        set_reply(blg_cache_ready ? "OK CACHE READY" :
+                  blg_cache ? "OK CACHE LOADING" : "OK CACHE EMPTY");
+    } else if (streq(cmd, "BLG CACHE DROP")) {
+        if (state == DL_SEALED) { set_reply("ERR SEALED"); return -1; }
+        if (blg_cache && fn_vfree) fn_vfree(blg_cache);
+        blg_cache = NULL;
+        blg_cache_size = blg_cache_written = 0;
+        blg_cache_ready = 0;
+        set_reply("OK CACHE EMPTY");
+    } else if (streq(cmd, "EFISP STATUS")) {
         set_reply(efisp_guard_armed ? "OK EFISP ARMED" : "OK EFISP UNAVAILABLE");
     } else if (prefix(cmd, "EFISP ARM ")) {
         unsigned int maj, min;
@@ -531,6 +594,43 @@ static ssize_t events_read(struct file *file, char __user *buf,
     *ppos += copied;
     return copied;
 }
+
+static ssize_t cache_write(struct file *file, const char __user *buf,
+                           size_t count, loff_t *ppos)
+{
+    unsigned long off;
+    if (!cli_authenticated()) return -13;
+    if (!blg_cache || blg_cache_ready) return -22;
+    off = (unsigned long)*ppos;
+    if (off > blg_cache_size || count > blg_cache_size - off) return -27;
+    if (fn_copy_from_user((char *)blg_cache + off, buf, count)) return -14;
+    *ppos += count;
+    if ((unsigned long)*ppos > blg_cache_written)
+        blg_cache_written = (unsigned long)*ppos;
+    return count;
+}
+
+static ssize_t cache_read(struct file *file, char __user *buf,
+                          size_t count, loff_t *ppos)
+{
+    unsigned long off, left;
+    int copied;
+    if (!cli_authenticated()) return -13;
+    if (!blg_cache || !blg_cache_ready) return -22;
+    off = (unsigned long)*ppos;
+    if (off >= blg_cache_size) return 0;
+    left = blg_cache_size - off;
+    if (count > left) count = left;
+    copied = compat_copy_to_user(buf, (char *)blg_cache + off, count);
+    if (copied <= 0) return -14;
+    *ppos += copied;
+    return copied;
+}
+
+static const struct proc_ops cache_ops = {
+    .proc_read = cache_read,
+    .proc_write = cache_write,
+};
 
 static const struct proc_ops control_ops = {
     .proc_read = control_read,
@@ -845,17 +945,19 @@ static int init_procfs(void)
     if (!proc_dir) return -12;
     proc_control = fn_proc_create("control", 0600, proc_dir, &control_ops);
     proc_events = fn_proc_create("events", 0400, proc_dir, &events_ops);
-    if (!proc_control || !proc_events) return -12;
+    proc_cache = fn_proc_create("cache", 0600, proc_dir, &cache_ops);
+    if (!proc_control || !proc_events || !proc_cache) return -12;
     return 0;
 }
 
 static void exit_procfs(void)
 {
     if (!fn_proc_remove) return;
+    if (proc_cache) fn_proc_remove(proc_cache);
     if (proc_events) fn_proc_remove(proc_events);
     if (proc_control) fn_proc_remove(proc_control);
     if (proc_dir) fn_proc_remove(proc_dir);
-    proc_events = proc_control = proc_dir = NULL;
+    proc_cache = proc_events = proc_control = proc_dir = NULL;
 }
 
 static void detect_efisp_device(void)
@@ -893,6 +995,9 @@ static long dynalab_init(const char *args, const char *event, void *__user reser
     event_head = 0;
     efisp_dev = 0;
     efisp_guard_armed = 0;
+    blg_cache = NULL;
+    blg_cache_size = blg_cache_written = 0;
+    blg_cache_ready = 0;
     clear_subjects();
     set_reply("UNINITIALIZED");
     dl_log("init event=%s default=AUTO state=READY\n", event ? event : "?");
@@ -901,7 +1006,13 @@ static long dynalab_init(const char *args, const char *event, void *__user reser
     fn_task_pid_nr = (void *)kp_lookup_name("__task_pid_nr_ns");
     fn_kern_path = (void *)kp_lookup_name("kern_path");
     fn_path_put = (void *)kp_lookup_name("path_put");
-    if (!fn_iov_iter_advance || !fn_task_pid_nr) {
+    fn_vmalloc = (void *)kp_lookup_name("vmalloc");
+    fn_vfree = (void *)kp_lookup_name("vfree");
+    fn_copy_from_user = (void *)kp_lookup_name("_copy_from_user");
+    if (!fn_copy_from_user)
+        fn_copy_from_user = (void *)kp_lookup_name("raw_copy_from_user");
+    if (!fn_iov_iter_advance || !fn_task_pid_nr || !fn_vmalloc ||
+        !fn_vfree || !fn_copy_from_user) {
         dl_log("ERROR: helper symbol not found\n");
         return -2;
     }
@@ -1025,6 +1136,10 @@ static long dynalab_exit(void *__user reserved)
     exit_procfs();
     authenticated_tgid = -1;
     hello_tgid = -1;
+    if (blg_cache && fn_vfree) fn_vfree(blg_cache);
+    blg_cache = NULL;
+    blg_cache_size = blg_cache_written = 0;
+    blg_cache_ready = 0;
     if (sym_reboot) unhook(sym_reboot);
     if (sym_fallocate) unhook(sym_fallocate);
     if (sym_ioctl) unhook(sym_ioctl);

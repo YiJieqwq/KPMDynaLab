@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdint.h>
@@ -13,12 +14,14 @@
 #include <sys/sysmacros.h>
 #include <sys/wait.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "../include/dl_rpc.h"
 
 #define CONTROL_PATH "/proc/dynalab/control"
 #define EVENTS_PATH  "/proc/dynalab/events"
+#define CACHE_PATH   "/proc/dynalab/cache"
 #define BLG_VAULT    "/data/adb/dynalab/blg-recovery-pack"
 #define MAX_LINE 512
 
@@ -334,6 +337,162 @@ static int blg_pack_verify(void)
     return run_shell(script);
 }
 
+struct blg_cache_source {
+    char path[384];
+    off_t size;
+    dev_t dev;
+    ino_t ino;
+};
+
+static int write_all_fd(int fd, const void *buf, size_t len)
+{
+    const unsigned char *p = buf;
+    while (len) {
+        ssize_t n = write(fd, p, len);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return -1;
+        p += n;
+        len -= (size_t)n;
+    }
+    return 0;
+}
+
+static int read_full_fd(int fd, void *buf, size_t len)
+{
+    unsigned char *p = buf;
+    while (len) {
+        ssize_t n = read(fd, p, len);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return -1;
+        p += n;
+        len -= (size_t)n;
+    }
+    return 0;
+}
+
+static int blg_cache_load(void)
+{
+    struct dirent **entries = NULL;
+    struct blg_cache_source src[64];
+    struct stat st;
+    char directory[320], command[96], reply[256];
+    unsigned char *in = NULL, *out = NULL;
+    uint64_t total = 0, transferred = 0;
+    struct timespec begin, end;
+    int count, used = 0, i, j, cache_fd = -1, rc = 1;
+    reply[0] = '\0';
+
+    if (blg_pack_verify()) return 1;
+    snprintf(directory, sizeof(directory), "%s/images", BLG_VAULT);
+    count = scandir(directory, &entries, NULL, alphasort);
+    if (count < 0) { perror("scandir Recovery Pack"); return 1; }
+
+    for (i = 0; i < count && used < 64; i++) {
+        size_t n = strlen(entries[i]->d_name);
+        int duplicate = 0;
+        if (n < 5 || strcmp(entries[i]->d_name + n - 4, ".img"))
+            continue;
+        snprintf(src[used].path, sizeof(src[used].path), "%s/%s",
+                 directory, entries[i]->d_name);
+        if (stat(src[used].path, &st) || !S_ISREG(st.st_mode)) continue;
+        for (j = 0; j < used; j++)
+            if (src[j].dev == st.st_dev && src[j].ino == st.st_ino)
+                duplicate = 1;
+        if (duplicate) continue;
+        src[used].size = st.st_size;
+        src[used].dev = st.st_dev;
+        src[used].ino = st.st_ino;
+        total += (uint64_t)st.st_size;
+        used++;
+    }
+    for (i = 0; i < count; i++) free(entries[i]);
+    free(entries);
+    if (!used || !total || total > 256ULL * 1024 * 1024) {
+        fprintf(stderr, "Invalid unique Recovery Pack size: %llu bytes\n",
+                (unsigned long long)total);
+        return 1;
+    }
+
+    snprintf(command, sizeof(command), "BLG CACHE BEGIN %llu",
+             (unsigned long long)total);
+    if (rpc(command, reply, sizeof(reply)) < 0 || strncmp(reply, "OK", 2)) {
+        fprintf(stderr, "KPM cache allocation failed: %s\n", reply);
+        return 1;
+    }
+    cache_fd = open(CACHE_PATH, O_WRONLY | O_CLOEXEC);
+    if (cache_fd < 0) { perror(CACHE_PATH); goto out; }
+    in = malloc(1024 * 1024);
+    out = malloc(1024 * 1024);
+    if (!in || !out) { perror("cache buffer"); goto out; }
+
+    clock_gettime(CLOCK_MONOTONIC, &begin);
+    for (i = 0; i < used; i++) {
+        int fd = open(src[i].path, O_RDONLY | O_CLOEXEC);
+        off_t left = src[i].size;
+        if (fd < 0) { perror(src[i].path); goto out; }
+        printf("  loading %s (%lld bytes)\n", src[i].path, (long long)left);
+        while (left) {
+            size_t chunk = left > 1024 * 1024 ? 1024 * 1024 : (size_t)left;
+            if (read_full_fd(fd, in, chunk) || write_all_fd(cache_fd, in, chunk)) {
+                close(fd); perror("cache upload"); goto out;
+            }
+            left -= chunk;
+            transferred += chunk;
+        }
+        close(fd);
+    }
+    close(cache_fd); cache_fd = -1;
+    if (rpc("BLG CACHE COMMIT", reply, sizeof(reply)) < 0 ||
+        strncmp(reply, "OK CACHE READY", 14)) {
+        fprintf(stderr, "KPM cache commit failed: %s\n", reply);
+        goto out;
+    }
+
+    cache_fd = open(CACHE_PATH, O_RDONLY | O_CLOEXEC);
+    if (cache_fd < 0) { perror(CACHE_PATH); goto out; }
+    for (i = 0; i < used; i++) {
+        int fd = open(src[i].path, O_RDONLY | O_CLOEXEC);
+        off_t left = src[i].size;
+        if (fd < 0) { perror(src[i].path); goto out; }
+        while (left) {
+            size_t chunk = left > 1024 * 1024 ? 1024 * 1024 : (size_t)left;
+            if (read_full_fd(fd, in, chunk) ||
+                read_full_fd(cache_fd, out, chunk) || memcmp(in, out, chunk)) {
+                close(fd);
+                fprintf(stderr, "RAM cache verification failed: %s\n", src[i].path);
+                goto out;
+            }
+            left -= chunk;
+        }
+        close(fd);
+    }
+    if (read(cache_fd, out, 1) != 0) {
+        fprintf(stderr, "RAM cache has unexpected trailing data.\n");
+        goto out;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    printf("BLG RAM Cache: READY\nUnique images: %d\nRAM usage: %llu bytes\n",
+           used, (unsigned long long)total);
+    printf("Upload + full byte verification: %.3f seconds\n",
+           (end.tv_sec - begin.tv_sec) +
+           (end.tv_nsec - begin.tv_nsec) / 1000000000.0);
+    rc = 0;
+out:
+    if (cache_fd >= 0) close(cache_fd);
+    free(in); free(out);
+    if (rc) rpc("BLG CACHE DROP", reply, sizeof(reply));
+    return rc;
+}
+
+static void blg_cache_status(void)
+{
+    char reply[256];
+    if (rpc("BLG CACHE STATUS", reply, sizeof(reply)) < 0)
+        puts("BLG RAM Cache: RPC ERROR");
+    else
+        printf("BLG RAM Cache: %s\n", reply);
+}
+
 static void blg_pack_status(void)
 {
     if (!blg_pack_present()) {
@@ -343,7 +502,7 @@ static void blg_pack_status(void)
     printf("Boot Lifeguard Recovery Pack: %s\n", BLG_VAULT);
     run_shell("cat '" BLG_VAULT "/device.txt' 2>/dev/null || true; "
               "du -sh '" BLG_VAULT "' 2>/dev/null || true");
-    puts("RAM Cache: NOT IMPLEMENTED IN THIS MILESTONE");
+    blg_cache_status();
 }
 
 static void blg_first_run_prompt(void)
@@ -375,6 +534,9 @@ static void help(void)
     puts("  blg status             show Recovery Pack status");
     puts("  blg pack create        extract and verify a Recovery Pack");
     puts("  blg pack verify        verify Recovery Pack hashes");
+    puts("  blg cache load         upload and verify KPM RAM Cache");
+    puts("  blg cache status       show KPM RAM Cache state");
+    puts("  blg cache drop         release KPM RAM Cache");
     puts("  clear                  clear event ring (not while SEALED)");
     puts("  run <program> [args]   seal and execute target");
     puts("  help");
@@ -441,7 +603,7 @@ int main(int argc, char **argv)
     }
 
     use_color = isatty(STDOUT_FILENO) && getenv("NO_COLOR") == NULL;
-    printf("%s%sKPMDynaLab%s %sv0.8.2-efisp-test%s\n",
+    printf("%s%sKPMDynaLab%s %sv0.8.3-ram-cache-test%s\n",
            clr(C_BOLD), clr(C_CYAN), clr(C_RESET), clr(C_DIM), clr(C_RESET));
     printf("%sKernel-assisted dynamic analysis laboratory%s\n\n",
            clr(C_DIM), clr(C_RESET));
@@ -517,8 +679,14 @@ int main(int argc, char **argv)
                 blg_pack_create();
             else if (!strcmp(arg, "pack verify"))
                 blg_pack_verify();
+            else if (!strcmp(arg, "cache load"))
+                blg_cache_load();
+            else if (!strcmp(arg, "cache status"))
+                blg_cache_status();
+            else if (!strcmp(arg, "cache drop"))
+                send_and_print("BLG CACHE DROP");
             else
-                puts("Usage: blg status | blg pack create | blg pack verify");
+                puts("Usage: blg status | blg pack create | blg pack verify | blg cache load | blg cache status | blg cache drop");
         } else if (!strcmp(cmd, "clear")) {
             send_and_print("CLEAR");
         } else if (!strcmp(cmd, "run") && arg) {
