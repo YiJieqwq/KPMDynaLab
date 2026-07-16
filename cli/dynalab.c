@@ -243,7 +243,11 @@ static int blg_pack_create(void)
         "mkdir -p \"$N/images\"\n"
         "COUNT=0\n"
         "for P in xbl_a xbl_b xbl_config_a xbl_config_b abl_a abl_b "
-        "devcfg_a devcfg_b ocdt ocdt_a ocdt_b; do\n"
+        "devcfg_a devcfg_b tz_a tz_b hyp_a hyp_b rpm_a rpm_b "
+        "aop_a aop_b aop_config_a aop_config_b keymaster_a keymaster_b "
+        "cmnlib_a cmnlib_b cmnlib64_a cmnlib64_b qupfw_a qupfw_b "
+        "uefisecapp_a uefisecapp_b imagefv_a imagefv_b shrm_a shrm_b "
+        "multiimgoem_a multiimgoem_b ocdt ocdt_a ocdt_b; do\n"
         "  D=\"/dev/block/by-name/$P\"\n"
         "  [ -b \"$D\" ] || continue\n"
         "  S=$(blockdev --getsize64 \"$D\")\n"
@@ -254,9 +258,19 @@ static int blg_pack_create(void)
         "  COUNT=$((COUNT + 1))\n"
         "done\n"
         "[ \"$COUNT\" -gt 0 ] || { echo 'No supported boot-chain partitions found.'; exit 4; }\n"
+        "for A in \"$N\"/images/*_a.img; do\n"
+        "  [ -e \"$A\" ] || continue\n"
+        "  B=\"${A%_a.img}_b.img\"\n"
+        "  [ -e \"$B\" ] || continue\n"
+        "  if cmp -s \"$A\" \"$B\"; then\n"
+        "    rm -f \"$B\" && ln \"$A\" \"$B\"\n"
+        "    echo \"  deduplicated $(basename \"$A\") / $(basename \"$B\")\"\n"
+        "  fi\n"
+        "done\n"
         "{\n"
         "  echo 'format=KPMDynaLab-BLG-Pack'\n"
-        "  echo 'format_version=1'\n"
+        "  echo 'format_version=2'\n"
+        "  echo 'storage=raw-images-with-hardlink-dedup'\n"
         "  echo \"created_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)\"\n"
         "  echo \"product=$(getprop ro.product.device)\"\n"
         "  echo \"hardware=$(getprop ro.hardware)\"\n"
@@ -399,7 +413,7 @@ int main(int argc, char **argv)
     }
 
     use_color = isatty(STDOUT_FILENO) && getenv("NO_COLOR") == NULL;
-    printf("%s%sKPMDynaLab%s %sv0.8.0-pack-test%s\n",
+    printf("%s%sKPMDynaLab%s %sv0.8.1-pack-v2-test%s\n",
            clr(C_BOLD), clr(C_CYAN), clr(C_RESET), clr(C_DIM), clr(C_RESET));
     printf("%sKernel-assisted dynamic analysis laboratory%s\n\n",
            clr(C_DIM), clr(C_RESET));
