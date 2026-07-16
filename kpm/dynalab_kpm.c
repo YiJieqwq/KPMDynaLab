@@ -63,7 +63,7 @@ extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
 #define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.7.0-sealed-mkdir-test");
+KPM_VERSION("0.8.2-efisp-guard-test");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("YiJieqwq");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
@@ -80,6 +80,8 @@ static void *sym_do_filp_open;
 static void *sym_do_mkdirat;
 static void *sym_notify_change, *sym_vfs_unlink, *sym_vfs_truncate;
 static void (*fn_iov_iter_advance)(struct iov_iter *i, size_t bytes);
+static int (*fn_kern_path)(const char *name, unsigned int flags, struct path *path);
+static void (*fn_path_put)(const struct path *path);
 static pid_t (*fn_task_pid_nr)(struct task_struct *task, int type,
                                struct pid_namespace *ns);
 
@@ -111,6 +113,8 @@ struct dl_subject {
 static struct dl_subject subjects[DL_MAX_SUBJECTS];
 static unsigned int session_counter;
 static unsigned int active_session;
+static dev_t efisp_dev;
+static int efisp_guard_armed;
 
 
 static int streq(const char *a, const char *b)
@@ -204,6 +208,20 @@ static int parse_hello(const char *s, int *api, int *event_abi)
     if (*s) return -1;
     *api = a;
     *event_abi = e;
+    return 0;
+}
+
+static int parse_dev_pair(const char *s, unsigned int *major, unsigned int *minor)
+{
+    unsigned int a = 0, b = 0;
+    if (!*s) return -1;
+    while (*s >= '0' && *s <= '9') a = a * 10 + (*s++ - '0');
+    if (*s++ != ' ') return -1;
+    if (!*s) return -1;
+    while (*s >= '0' && *s <= '9') b = b * 10 + (*s++ - '0');
+    if (*s || a > 0xfff || b > 0xfffff) return -1;
+    *major = a;
+    *minor = b;
     return 0;
 }
 
@@ -386,7 +404,7 @@ static ssize_t control_write(struct file *file, const char __user *buf,
                       "ERR KPM_OLD" : "ERR CLI_OLD");
         } else {
             hello_tgid = current_id(1);
-            set_reply("OK HELLO 4 2 0.7.0-sealed-mkdir-test");
+            set_reply("OK HELLO 5 2 0.8.2-efisp-guard-test");
         }
         return n;
     }
@@ -427,7 +445,19 @@ static ssize_t control_write(struct file *file, const char __user *buf,
         return -13;
     }
 
-    if (streq(cmd, "ACTIVE")) {
+    if (streq(cmd, "EFISP STATUS")) {
+        set_reply(efisp_guard_armed ? "OK EFISP ARMED" : "OK EFISP UNAVAILABLE");
+    } else if (prefix(cmd, "EFISP ARM ")) {
+        unsigned int maj, min;
+        if (state == DL_SEALED) { set_reply("ERR SEALED"); return -1; }
+        if (parse_dev_pair(cmd + 10, &maj, &min)) {
+            set_reply("ERR EFISP DEVICE");
+            return -22;
+        }
+        efisp_dev = MKDEV(maj, min);
+        efisp_guard_armed = 1;
+        set_reply("OK EFISP ARMED");
+    } else if (streq(cmd, "ACTIVE")) {
         set_active_reply();
     } else if (prefix(cmd, "TARGET ")) {
         int target_pid;
@@ -669,22 +699,25 @@ static void before_blkdev_write_iter(hook_fargs2_t *args, void *udata)
     loff_t pos;
     dev_t dev = 0;
 
+    int simulate;
     if (!iocb || !from) return;
     count = iov_iter_count(from);
     pos = iocb->ki_pos;
     if (iocb->ki_filp && iocb->ki_filp->f_mapping &&
         iocb->ki_filp->f_mapping->host)
         dev = iocb->ki_filp->f_mapping->host->i_rdev;
+    simulate = simulate_dangerous() ||
+               (efisp_guard_armed && dev == efisp_dev);
 
     dl_log("BLOCK_WRITE pid=%d dev=%u:%u off=%lld len=%zu profile=%s action=%s\n",
             current_id(0), MAJOR(dev), MINOR(dev), pos, count, profile_name(),
-            simulate_dangerous() ? "SIMULATE" : "PASS");
+            simulate ? "SIMULATE" : "PASS");
 
     add_event(DL_WIRE_BLOCK_WRITE,
-              simulate_dangerous() ? DL_WIRE_SIMULATE : DL_WIRE_PASS,
+              simulate ? DL_WIRE_SIMULATE : DL_WIRE_PASS,
               dev, pos, count, 0);
 
-    if (!simulate_dangerous()) return;
+    if (!simulate) return;
     fn_iov_iter_advance(from, count);
     iocb->ki_pos += count;
     args->skip_origin = 1;
@@ -701,20 +734,23 @@ static void before_blkdev_ioctl(hook_fargs3_t *args, void *udata)
     struct file *file = (struct file *)args->arg0;
     unsigned int cmd = (unsigned int)args->arg1;
     dev_t dev = 0;
+    int simulate;
 
     if (!dangerous_ioctl(cmd)) return;
     if (file && file->f_mapping && file->f_mapping->host)
         dev = file->f_mapping->host->i_rdev;
+    simulate = simulate_dangerous() ||
+               (efisp_guard_armed && dev == efisp_dev);
 
     dl_log("BLOCK_IOCTL pid=%d dev=%u:%u cmd=0x%x profile=%s action=%s\n",
             current_id(0), MAJOR(dev), MINOR(dev), cmd, profile_name(),
-            simulate_dangerous() ? "SIMULATE" : "PASS");
+            simulate ? "SIMULATE" : "PASS");
 
     add_event(DL_WIRE_BLOCK_IOCTL,
-              simulate_dangerous() ? DL_WIRE_SIMULATE : DL_WIRE_PASS,
+              simulate ? DL_WIRE_SIMULATE : DL_WIRE_PASS,
               dev, 0, 0, cmd);
 
-    if (simulate_dangerous()) {
+    if (simulate) {
         args->skip_origin = 1;
         args->ret = 0;
     }
@@ -727,19 +763,22 @@ static void before_blkdev_fallocate(hook_fargs4_t *args, void *udata)
     loff_t start = (loff_t)args->arg2;
     loff_t len = (loff_t)args->arg3;
     dev_t dev = 0;
+    int simulate;
 
     if (file && file->f_mapping && file->f_mapping->host)
         dev = file->f_mapping->host->i_rdev;
+    simulate = simulate_dangerous() ||
+               (efisp_guard_armed && dev == efisp_dev);
 
     dl_log("BLOCK_FALLOCATE pid=%d dev=%u:%u mode=0x%x off=%lld len=%lld profile=%s action=%s\n",
             current_id(0), MAJOR(dev), MINOR(dev), mode, start, len,
-            profile_name(), simulate_dangerous() ? "SIMULATE" : "PASS");
+            profile_name(), simulate ? "SIMULATE" : "PASS");
 
     add_event(DL_WIRE_BLOCK_FALLOCATE,
-              simulate_dangerous() ? DL_WIRE_SIMULATE : DL_WIRE_PASS,
+              simulate ? DL_WIRE_SIMULATE : DL_WIRE_PASS,
               dev, start, len, mode);
 
-    if (simulate_dangerous()) {
+    if (simulate) {
         args->skip_origin = 1;
         args->ret = 0;
     }
@@ -819,6 +858,30 @@ static void exit_procfs(void)
     proc_events = proc_control = proc_dir = NULL;
 }
 
+static void detect_efisp_device(void)
+{
+    static const char *names[] = {
+        "/dev/block/by-name/efisp",
+        "/dev/block/by-name/efisp_a",
+        "/dev/block/by-name/efisp_b",
+    };
+    struct path path;
+    struct inode *inode;
+    int i;
+    if (!fn_kern_path || !fn_path_put) return;
+    for (i = 0; i < (int)(sizeof(names) / sizeof(names[0])); i++) {
+        if (fn_kern_path(names[i], 0, &path)) continue;
+        inode = path.dentry ? d_inode(path.dentry) : NULL;
+        if (inode && S_ISBLK(inode->i_mode)) {
+            efisp_dev = inode->i_rdev;
+            efisp_guard_armed = 1;
+            fn_path_put(&path);
+            return;
+        }
+        fn_path_put(&path);
+    }
+}
+
 static long dynalab_init(const char *args, const char *event, void *__user reserved)
 {
     int rc;
@@ -828,16 +891,21 @@ static long dynalab_init(const char *args, const char *event, void *__user reser
     hello_tgid = -1;
     reply_tgid = -1;
     event_head = 0;
+    efisp_dev = 0;
+    efisp_guard_armed = 0;
     clear_subjects();
     set_reply("UNINITIALIZED");
     dl_log("init event=%s default=AUTO state=READY\n", event ? event : "?");
 
     fn_iov_iter_advance = (void *)kp_lookup_name("iov_iter_advance");
     fn_task_pid_nr = (void *)kp_lookup_name("__task_pid_nr_ns");
+    fn_kern_path = (void *)kp_lookup_name("kern_path");
+    fn_path_put = (void *)kp_lookup_name("path_put");
     if (!fn_iov_iter_advance || !fn_task_pid_nr) {
         dl_log("ERROR: helper symbol not found\n");
         return -2;
     }
+    detect_efisp_device();
 
     rc = install_one("wake_up_new_task", 1, before_fork, &sym_fork);
     if (rc) goto fail;

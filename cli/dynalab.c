@@ -10,6 +10,7 @@
 #include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/sysmacros.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
@@ -232,6 +233,32 @@ static int blg_pack_present(void)
     return access(BLG_VAULT "/manifest.sha256", R_OK) == 0;
 }
 
+static int blg_efisp_arm(void)
+{
+    static const char *paths[] = {
+        "/dev/block/by-name/efisp",
+        "/dev/block/by-name/efisp_a",
+        "/dev/block/by-name/efisp_b",
+    };
+    struct stat st;
+    char command[96], reply[256];
+    size_t i;
+    for (i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+        if (stat(paths[i], &st) || !S_ISBLK(st.st_mode))
+            continue;
+        snprintf(command, sizeof(command), "EFISP ARM %u %u",
+                 major(st.st_rdev), minor(st.st_rdev));
+        if (rpc(command, reply, sizeof(reply)) < 0) {
+            fprintf(stderr, "EFISP Guard registration failed.\n");
+            return 1;
+        }
+        printf("EFISP Guard: %s (%s)\n", reply, paths[i]);
+        return strncmp(reply, "OK", 2) != 0;
+    }
+    puts("EFISP Guard: NOT PRESENT ON THIS DEVICE");
+    return 0;
+}
+
 static int blg_pack_create(void)
 {
     static const char script[] =
@@ -247,7 +274,8 @@ static int blg_pack_create(void)
         "aop_a aop_b aop_config_a aop_config_b keymaster_a keymaster_b "
         "cmnlib_a cmnlib_b cmnlib64_a cmnlib64_b qupfw_a qupfw_b "
         "uefisecapp_a uefisecapp_b imagefv_a imagefv_b shrm_a shrm_b "
-        "multiimgoem_a multiimgoem_b ocdt ocdt_a ocdt_b; do\n"
+        "multiimgoem_a multiimgoem_b efisp efisp_a efisp_b "
+        "ocdt ocdt_a ocdt_b; do\n"
         "  D=\"/dev/block/by-name/$P\"\n"
         "  [ -b \"$D\" ] || continue\n"
         "  S=$(blockdev --getsize64 \"$D\")\n"
@@ -413,7 +441,7 @@ int main(int argc, char **argv)
     }
 
     use_color = isatty(STDOUT_FILENO) && getenv("NO_COLOR") == NULL;
-    printf("%s%sKPMDynaLab%s %sv0.8.1-pack-v2-test%s\n",
+    printf("%s%sKPMDynaLab%s %sv0.8.2-efisp-test%s\n",
            clr(C_BOLD), clr(C_CYAN), clr(C_RESET), clr(C_DIM), clr(C_RESET));
     printf("%sKernel-assisted dynamic analysis laboratory%s\n\n",
            clr(C_DIM), clr(C_RESET));
@@ -435,6 +463,7 @@ int main(int argc, char **argv)
     }
     if (login() < 0)
         return 1;
+    blg_efisp_arm();
     blg_first_run_prompt();
 
     while (1) {
