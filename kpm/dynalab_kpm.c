@@ -63,7 +63,7 @@ extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
 #define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.8.3-ram-cache-test");
+KPM_VERSION("0.8.3.1-ram-cache-test");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("YiJieqwq");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
@@ -427,7 +427,7 @@ static ssize_t control_write(struct file *file, const char __user *buf,
                       "ERR KPM_OLD" : "ERR CLI_OLD");
         } else {
             hello_tgid = current_id(1);
-            set_reply("OK HELLO 6 2 0.8.3-ram-cache-test");
+            set_reply("OK HELLO 6 2 0.8.3.1-ram-cache-test");
         }
         return n;
     }
@@ -1006,14 +1006,17 @@ static long dynalab_init(const char *args, const char *event, void *__user reser
     fn_task_pid_nr = (void *)kp_lookup_name("__task_pid_nr_ns");
     fn_kern_path = (void *)kp_lookup_name("kern_path");
     fn_path_put = (void *)kp_lookup_name("path_put");
-    fn_vmalloc = (void *)kp_lookup_name("vmalloc");
+    fn_vmalloc = (void *)kp_lookup_name("vmalloc_noprof");
+    if (!fn_vmalloc) fn_vmalloc = (void *)kp_lookup_name("vmalloc");
     fn_vfree = (void *)kp_lookup_name("vfree");
     fn_copy_from_user = (void *)kp_lookup_name("_copy_from_user");
     if (!fn_copy_from_user)
         fn_copy_from_user = (void *)kp_lookup_name("raw_copy_from_user");
     if (!fn_iov_iter_advance || !fn_task_pid_nr || !fn_vmalloc ||
         !fn_vfree || !fn_copy_from_user) {
-        dl_log("ERROR: helper symbol not found\n");
+        dl_log("ERROR: helper missing iov=%d pid=%d vmalloc=%d vfree=%d copy=%d\n",
+               !!fn_iov_iter_advance, !!fn_task_pid_nr, !!fn_vmalloc,
+               !!fn_vfree, !!fn_copy_from_user);
         return -2;
     }
     detect_efisp_device();
