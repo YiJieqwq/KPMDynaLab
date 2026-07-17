@@ -470,8 +470,13 @@ static int blg_cache_load(void)
         fprintf(stderr, "RAM cache has unexpected trailing data.\n");
         goto out;
     }
+    if (rpc("BLG CACHE VERIFY", reply, sizeof(reply)) < 0 ||
+        strncmp(reply, "OK CACHE INTACT", 15)) {
+        fprintf(stderr, "KPM cache SHA-256 verification failed: %s\n", reply);
+        goto out;
+    }
     clock_gettime(CLOCK_MONOTONIC, &end);
-    printf("BLG RAM Cache: READY\nUnique images: %d\nRAM usage: %llu bytes\n",
+    printf("BLG RAM Cache: READY RO / SHA-256 INTACT\nUnique images: %d\nRAM usage: %llu bytes\n",
            used, (unsigned long long)total);
     printf("Upload + full byte verification: %.3f seconds\n",
            (end.tv_sec - begin.tv_sec) +
@@ -536,6 +541,7 @@ static void help(void)
     puts("  blg pack verify        verify Recovery Pack hashes");
     puts("  blg cache load         upload and verify KPM RAM Cache");
     puts("  blg cache status       show KPM RAM Cache state");
+    puts("  blg cache verify       verify KPM RAM Cache SHA-256");
     puts("  blg cache drop         release KPM RAM Cache");
     puts("  clear                  clear event ring (not while SEALED)");
     puts("  run <program> [args]   seal and execute target");
@@ -603,7 +609,7 @@ int main(int argc, char **argv)
     }
 
     use_color = isatty(STDOUT_FILENO) && getenv("NO_COLOR") == NULL;
-    printf("%s%sKPMDynaLab%s %sv0.8.3-ram-cache-test%s\n",
+    printf("%s%sKPMDynaLab%s %sv0.8.4-ro-cache-test%s\n",
            clr(C_BOLD), clr(C_CYAN), clr(C_RESET), clr(C_DIM), clr(C_RESET));
     printf("%sKernel-assisted dynamic analysis laboratory%s\n\n",
            clr(C_DIM), clr(C_RESET));
@@ -683,10 +689,12 @@ int main(int argc, char **argv)
                 blg_cache_load();
             else if (!strcmp(arg, "cache status"))
                 blg_cache_status();
+            else if (!strcmp(arg, "cache verify"))
+                send_and_print("BLG CACHE VERIFY");
             else if (!strcmp(arg, "cache drop"))
                 send_and_print("BLG CACHE DROP");
             else
-                puts("Usage: blg status | blg pack create | blg pack verify | blg cache load | blg cache status | blg cache drop");
+                puts("Usage: blg status | blg pack create | blg pack verify | blg cache load | blg cache status | blg cache verify | blg cache drop");
         } else if (!strcmp(cmd, "clear")) {
             send_and_print("CLEAR");
         } else if (!strcmp(cmd, "run") && arg) {

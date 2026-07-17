@@ -40,7 +40,7 @@ $(CLI_OUT): cli/dynalab.c include/dl_rpc.h | $(BUILD)
 # Build the device-test KPM against Android 16 / Linux 6.12 headers.
 KPM_SRC := kpm/dynalab_kpm.c
 KPM_OBJ := $(BUILD)/dynalab_kpm.o
-KPM_OUT := $(BUILD)/KPMDynaLab-0.8.3.1-ram-cache-test.kpm
+KPM_OUT := $(BUILD)/KPMDynaLab-0.8.4-ro-cache-test.kpm
 KPM_INCLUDES := \
 	-I$(KDIR)/arch/arm64/include \
 	-I$(KDIR)/arch/arm64/include/generated \

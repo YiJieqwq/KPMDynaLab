@@ -63,7 +63,7 @@ extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
 #define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.8.3.1-ram-cache-test");
+KPM_VERSION("0.8.4-ro-cache-test");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("YiJieqwq");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
@@ -82,6 +82,10 @@ static void *sym_notify_change, *sym_vfs_unlink, *sym_vfs_truncate;
 static void (*fn_iov_iter_advance)(struct iov_iter *i, size_t bytes);
 static unsigned long (*fn_copy_from_user)(void *to, const void __user *from,
                                           unsigned long n);
+static int (*fn_set_memory_ro)(unsigned long addr, int numpages);
+static int (*fn_set_memory_rw)(unsigned long addr, int numpages);
+static void (*fn_sha256)(const unsigned char *data, unsigned int len,
+                         unsigned char *out);
 static void *(*fn_vmalloc)(unsigned long size);
 static void (*fn_vfree)(const void *addr);
 static int (*fn_kern_path)(const char *name, unsigned int flags, struct path *path);
@@ -95,6 +99,8 @@ static void *blg_cache;
 static unsigned long blg_cache_size;
 static unsigned long blg_cache_written;
 static int blg_cache_ready;
+static int blg_cache_ro;
+static unsigned char blg_cache_sha256[32];
 static struct proc_dir_entry *(*fn_proc_mkdir)(const char *, struct proc_dir_entry *);
 static struct proc_dir_entry *(*fn_proc_create)(const char *, umode_t,
                                                 struct proc_dir_entry *,
@@ -396,6 +402,38 @@ static ssize_t control_read(struct file *file, char __user *buf,
     return copied;
 }
 
+static int digest_equal(const unsigned char *a, const unsigned char *b)
+{
+    int i;
+    unsigned char diff = 0;
+    for (i = 0; i < 32; i++) diff |= a[i] ^ b[i];
+    return diff == 0;
+}
+
+static void clear_cache_digest(void)
+{
+    int i;
+    for (i = 0; i < 32; i++) blg_cache_sha256[i] = 0;
+}
+
+static int free_blg_cache(void)
+{
+    int pages, rc;
+    if (!blg_cache) return 0;
+    pages = (int)((blg_cache_size + PAGE_SIZE - 1) / PAGE_SIZE);
+    if (blg_cache_ro) {
+        rc = fn_set_memory_rw((unsigned long)blg_cache, pages);
+        if (rc) return rc;
+        blg_cache_ro = 0;
+    }
+    fn_vfree(blg_cache);
+    blg_cache = NULL;
+    blg_cache_size = blg_cache_written = 0;
+    blg_cache_ready = 0;
+    clear_cache_digest();
+    return 0;
+}
+
 static ssize_t control_write(struct file *file, const char __user *buf,
                              size_t count, loff_t *ppos)
 {
@@ -427,7 +465,7 @@ static ssize_t control_write(struct file *file, const char __user *buf,
                       "ERR KPM_OLD" : "ERR CLI_OLD");
         } else {
             hello_tgid = current_id(1);
-            set_reply("OK HELLO 6 2 0.8.3.1-ram-cache-test");
+            set_reply("OK HELLO 7 2 0.8.4-ro-cache-test");
         }
         return n;
     }
@@ -475,11 +513,15 @@ static ssize_t control_write(struct file *file, const char __user *buf,
             set_reply("ERR CACHE SIZE");
             return -22;
         }
-        if (!fn_vmalloc || !fn_vfree || !fn_copy_from_user) {
+        if (!fn_vmalloc || !fn_vfree || !fn_copy_from_user ||
+            !fn_set_memory_ro || !fn_set_memory_rw || !fn_sha256) {
             set_reply("ERR CACHE API");
             return -38;
         }
-        if (blg_cache) fn_vfree(blg_cache);
+        if (free_blg_cache()) {
+            set_reply("ERR CACHE UNLOCK");
+            return -5;
+        }
         blg_cache = fn_vmalloc(size);
         if (!blg_cache) {
             blg_cache_size = blg_cache_written = 0;
@@ -490,23 +532,45 @@ static ssize_t control_write(struct file *file, const char __user *buf,
         blg_cache_size = size;
         blg_cache_written = 0;
         blg_cache_ready = 0;
+        blg_cache_ro = 0;
+        clear_cache_digest();
         set_reply("OK CACHE BEGIN");
     } else if (streq(cmd, "BLG CACHE COMMIT")) {
+        int pages, rc;
         if (!blg_cache || blg_cache_written != blg_cache_size) {
             set_reply("ERR CACHE INCOMPLETE");
             return -22;
         }
+        fn_sha256(blg_cache, (unsigned int)blg_cache_size, blg_cache_sha256);
+        pages = (int)((blg_cache_size + PAGE_SIZE - 1) / PAGE_SIZE);
+        rc = fn_set_memory_ro((unsigned long)blg_cache, pages);
+        if (rc) {
+            clear_cache_digest();
+            set_reply("ERR CACHE RO");
+            return rc;
+        }
+        blg_cache_ro = 1;
         blg_cache_ready = 1;
-        set_reply("OK CACHE READY");
+        set_reply("OK CACHE READY RO");
+    } else if (streq(cmd, "BLG CACHE VERIFY")) {
+        unsigned char digest[32];
+        if (!blg_cache || !blg_cache_ready || !blg_cache_ro) {
+            set_reply("ERR CACHE NOT READY");
+            return -22;
+        }
+        fn_sha256(blg_cache, (unsigned int)blg_cache_size, digest);
+        set_reply(digest_equal(digest, blg_cache_sha256) ?
+                  "OK CACHE INTACT" : "ERR CACHE CORRUPTED");
     } else if (streq(cmd, "BLG CACHE STATUS")) {
-        set_reply(blg_cache_ready ? "OK CACHE READY" :
+        set_reply(blg_cache_ready ?
+                  (blg_cache_ro ? "OK CACHE READY RO" : "ERR CACHE RW") :
                   blg_cache ? "OK CACHE LOADING" : "OK CACHE EMPTY");
     } else if (streq(cmd, "BLG CACHE DROP")) {
         if (state == DL_SEALED) { set_reply("ERR SEALED"); return -1; }
-        if (blg_cache && fn_vfree) fn_vfree(blg_cache);
-        blg_cache = NULL;
-        blg_cache_size = blg_cache_written = 0;
-        blg_cache_ready = 0;
+        if (free_blg_cache()) {
+            set_reply("ERR CACHE UNLOCK");
+            return -5;
+        }
         set_reply("OK CACHE EMPTY");
     } else if (streq(cmd, "EFISP STATUS")) {
         set_reply(efisp_guard_armed ? "OK EFISP ARMED" : "OK EFISP UNAVAILABLE");
@@ -997,7 +1061,8 @@ static long dynalab_init(const char *args, const char *event, void *__user reser
     efisp_guard_armed = 0;
     blg_cache = NULL;
     blg_cache_size = blg_cache_written = 0;
-    blg_cache_ready = 0;
+    blg_cache_ready = blg_cache_ro = 0;
+    clear_cache_digest();
     clear_subjects();
     set_reply("UNINITIALIZED");
     dl_log("init event=%s default=AUTO state=READY\n", event ? event : "?");
@@ -1009,14 +1074,19 @@ static long dynalab_init(const char *args, const char *event, void *__user reser
     fn_vmalloc = (void *)kp_lookup_name("vmalloc_noprof");
     if (!fn_vmalloc) fn_vmalloc = (void *)kp_lookup_name("vmalloc");
     fn_vfree = (void *)kp_lookup_name("vfree");
+    fn_set_memory_ro = (void *)kp_lookup_name("set_memory_ro");
+    fn_set_memory_rw = (void *)kp_lookup_name("set_memory_rw");
+    fn_sha256 = (void *)kp_lookup_name("sha256");
     fn_copy_from_user = (void *)kp_lookup_name("_copy_from_user");
     if (!fn_copy_from_user)
         fn_copy_from_user = (void *)kp_lookup_name("raw_copy_from_user");
     if (!fn_iov_iter_advance || !fn_task_pid_nr || !fn_vmalloc ||
-        !fn_vfree || !fn_copy_from_user) {
-        dl_log("ERROR: helper missing iov=%d pid=%d vmalloc=%d vfree=%d copy=%d\n",
+        !fn_vfree || !fn_copy_from_user || !fn_set_memory_ro ||
+        !fn_set_memory_rw || !fn_sha256) {
+        dl_log("ERROR: helper missing iov=%d pid=%d vmalloc=%d vfree=%d copy=%d ro=%d rw=%d sha=%d\n",
                !!fn_iov_iter_advance, !!fn_task_pid_nr, !!fn_vmalloc,
-               !!fn_vfree, !!fn_copy_from_user);
+               !!fn_vfree, !!fn_copy_from_user, !!fn_set_memory_ro,
+               !!fn_set_memory_rw, !!fn_sha256);
         return -2;
     }
     detect_efisp_device();
@@ -1139,10 +1209,7 @@ static long dynalab_exit(void *__user reserved)
     exit_procfs();
     authenticated_tgid = -1;
     hello_tgid = -1;
-    if (blg_cache && fn_vfree) fn_vfree(blg_cache);
-    blg_cache = NULL;
-    blg_cache_size = blg_cache_written = 0;
-    blg_cache_ready = 0;
+    free_blg_cache();
     if (sym_reboot) unhook(sym_reboot);
     if (sym_fallocate) unhook(sym_fallocate);
     if (sym_ioctl) unhook(sym_ioctl);
