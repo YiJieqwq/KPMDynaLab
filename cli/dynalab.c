@@ -344,6 +344,125 @@ struct blg_cache_source {
     ino_t ino;
 };
 
+static char blg_active_slot(void)
+{
+    const char *files[] = { "/proc/bootconfig", "/proc/cmdline" };
+    char buf[8192];
+    int i;
+    for (i = 0; i < 2; i++) {
+        int fd = open(files[i], O_RDONLY | O_CLOEXEC);
+        ssize_t n;
+        char *p;
+        if (fd < 0) continue;
+        n = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+        if (n <= 0) continue;
+        buf[n] = '\0';
+        p = strstr(buf, "androidboot.slot_suffix");
+        if (p) {
+            p += strlen("androidboot.slot_suffix");
+            while (*p == ' ' || *p == '\t') p++;
+            if (*p == '=') p++;
+            while (*p == ' ' || *p == '\t' || *p == '\"') p++;
+            if (*p == '_') p++;
+            if (*p == 'a' || *p == 'b') return *p;
+        }
+    }
+    return 0;
+}
+
+static int blg_map_build(struct blg_cache_source *src, int used)
+{
+    char reply[256], command[512], target[DL_BLG_MAP_NAME];
+    char active = blg_active_slot();
+    unsigned long long offset = 0;
+    int i, entries = 0;
+    if (active != 'a' && active != 'b') {
+        fprintf(stderr, "Cannot determine active slot.\n");
+        return 1;
+    }
+    if (rpc("BLG MAP BEGIN", reply, sizeof(reply)) < 0 || strncmp(reply, "OK", 2))
+        return 1;
+    for (i = 0; i < used; i++) {
+        const char *base = strrchr(src[i].path, '/');
+        char name[DL_BLG_MAP_NAME];
+        size_t len;
+        struct stat st;
+        int fd;
+        off_t target_size;
+        unsigned int flags, tier;
+        base = base ? base + 1 : src[i].path;
+        len = strlen(base);
+        if (len >= sizeof(name)) {
+            fprintf(stderr, "Image name too long: %s\n", base);
+            return 1;
+        }
+        memcpy(name, base, len + 1);
+        if (len > 4 && !strcmp(name + len - 4, ".img")) name[len - 4] = '\0';
+
+        if (!strcmp(name, "efisp") || !strcmp(name, "efisp_a") ||
+            !strcmp(name, "efisp_b")) {
+            snprintf(target, sizeof(target), "%s", name);
+            flags = DL_BLG_FLAG_SHARED | DL_BLG_FLAG_EFISP;
+            tier = 0;
+        } else {
+            len = strlen(name);
+            if (len < 3 || name[len - 2] != '_' ||
+                (name[len - 1] != 'a' && name[len - 1] != 'b')) {
+                offset += src[i].size;
+                continue;
+            }
+            if (name[len - 1] != active) {
+                offset += src[i].size;
+                continue;
+            }
+            snprintf(target, sizeof(target), "%s", name);
+            target[len - 1] = active == 'a' ? 'b' : 'a';
+            flags = DL_BLG_FLAG_AB;
+            tier = (!strncmp(name, "xbl", 3)) ? 0 :
+                   (!strncmp(name, "multiimgoem", 11) ? 2 : 1);
+        }
+
+        snprintf(command, sizeof(command), "/dev/block/by-name/%s", target);
+        if (stat(command, &st) || !S_ISBLK(st.st_mode)) {
+            fprintf(stderr, "Missing map target: %s\n", command);
+            return 1;
+        }
+        fd = open(command, O_RDONLY | O_CLOEXEC);
+        if (fd < 0) { perror(command); return 1; }
+        target_size = lseek(fd, 0, SEEK_END);
+        close(fd);
+        if (target_size <= 0 || src[i].size > target_size) {
+            fprintf(stderr, "Invalid target size: %s\n", command);
+            return 1;
+        }
+        snprintf(command, sizeof(command),
+                 "BLG MAP ADD %s %llu %llu %u %u %llu %u %u",
+                 target, offset, (unsigned long long)src[i].size,
+                 major(st.st_rdev), minor(st.st_rdev),
+                 (unsigned long long)target_size, flags, tier);
+        if (rpc(command, reply, sizeof(reply)) < 0 || strncmp(reply, "OK", 2)) {
+            fprintf(stderr, "Map add failed: %s\n", reply);
+            return 1;
+        }
+        entries++;
+        offset += src[i].size;
+    }
+    if (!entries || rpc("BLG MAP COMMIT", reply, sizeof(reply)) < 0 ||
+        strncmp(reply, "OK PLAN READY NO WRITE", 22)) {
+        fprintf(stderr, "Map commit failed: %s\n", reply);
+        return 1;
+    }
+    if (rpc("BLG MAP VERIFY", reply, sizeof(reply)) < 0 ||
+        strncmp(reply, "OK MAP INTACT", 13)) {
+        fprintf(stderr, "Map verification failed: %s\n", reply);
+        return 1;
+    }
+    printf("BLG Image Map: PLAN READY NO WRITE (%d targets, active slot _%c)\n",
+           entries, active);
+    return 0;
+}
+
 static int write_all_fd(int fd, const void *buf, size_t len)
 {
     const unsigned char *p = buf;
@@ -475,6 +594,7 @@ static int blg_cache_load(void)
         fprintf(stderr, "KPM cache SHA-256 verification failed: %s\n", reply);
         goto out;
     }
+    if (blg_map_build(src, used)) goto out;
     clock_gettime(CLOCK_MONOTONIC, &end);
     printf("BLG RAM Cache: READY RO / SHA-256 INTACT\nUnique images: %d\nRAM usage: %llu bytes\n",
            used, (unsigned long long)total);
@@ -508,6 +628,11 @@ static void blg_pack_status(void)
     run_shell("cat '" BLG_VAULT "/device.txt' 2>/dev/null || true; "
               "du -sh '" BLG_VAULT "' 2>/dev/null || true");
     blg_cache_status();
+    {
+        char reply[256];
+        if (!rpc("BLG MAP STATUS", reply, sizeof(reply)))
+            printf("BLG Image Map: %s\n", reply);
+    }
 }
 
 static void blg_first_run_prompt(void)
@@ -543,6 +668,9 @@ static void help(void)
     puts("  blg cache status       show KPM RAM Cache state");
     puts("  blg cache verify       verify KPM RAM Cache SHA-256");
     puts("  blg cache drop         release KPM RAM Cache");
+    puts("  blg map status         show immutable write-plan state");
+    puts("  blg map verify         verify Image Map SHA-256");
+    puts("  blg map drop           clear Image Map before SEALED");
     puts("  clear                  clear event ring (not while SEALED)");
     puts("  run <program> [args]   seal and execute target");
     puts("  help");
@@ -609,7 +737,7 @@ int main(int argc, char **argv)
     }
 
     use_color = isatty(STDOUT_FILENO) && getenv("NO_COLOR") == NULL;
-    printf("%s%sKPMDynaLab%s %sv0.8.4-ro-cache-test%s\n",
+    printf("%s%sKPMDynaLab%s %sv0.8.5-image-map-test%s\n",
            clr(C_BOLD), clr(C_CYAN), clr(C_RESET), clr(C_DIM), clr(C_RESET));
     printf("%sKernel-assisted dynamic analysis laboratory%s\n\n",
            clr(C_DIM), clr(C_RESET));
@@ -693,8 +821,14 @@ int main(int argc, char **argv)
                 send_and_print("BLG CACHE VERIFY");
             else if (!strcmp(arg, "cache drop"))
                 send_and_print("BLG CACHE DROP");
+            else if (!strcmp(arg, "map status"))
+                send_and_print("BLG MAP STATUS");
+            else if (!strcmp(arg, "map verify"))
+                send_and_print("BLG MAP VERIFY");
+            else if (!strcmp(arg, "map drop"))
+                send_and_print("BLG MAP DROP");
             else
-                puts("Usage: blg status | blg pack create | blg pack verify | blg cache load | blg cache status | blg cache verify | blg cache drop");
+                puts("Usage: blg status | blg pack create | blg pack verify | blg cache load/status/verify/drop | blg map status/verify/drop");
         } else if (!strcmp(cmd, "clear")) {
             send_and_print("CLEAR");
         } else if (!strcmp(cmd, "run") && arg) {

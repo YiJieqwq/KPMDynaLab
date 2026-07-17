@@ -63,7 +63,7 @@ extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
 #define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.8.4-ro-cache-test");
+KPM_VERSION("0.8.5-image-map-test");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("YiJieqwq");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
@@ -101,6 +101,10 @@ static unsigned long blg_cache_written;
 static int blg_cache_ready;
 static int blg_cache_ro;
 static unsigned char blg_cache_sha256[32];
+static struct dl_blg_map_entry blg_map[DL_BLG_MAP_MAX];
+static unsigned int blg_map_count;
+static int blg_map_ready;
+static unsigned char blg_map_sha256[32];
 static struct proc_dir_entry *(*fn_proc_mkdir)(const char *, struct proc_dir_entry *);
 static struct proc_dir_entry *(*fn_proc_create)(const char *, umode_t,
                                                 struct proc_dir_entry *,
@@ -251,6 +255,44 @@ static int parse_ulong(const char *s, unsigned long *value)
         v = next;
     }
     *value = v;
+    return 0;
+}
+
+static char *next_token(char **cursor)
+{
+    char *s = *cursor, *start;
+    while (*s == ' ') s++;
+    if (!*s) { *cursor = s; return NULL; }
+    start = s;
+    while (*s && *s != ' ') s++;
+    if (*s) *s++ = '\0';
+    *cursor = s;
+    return start;
+}
+
+static int parse_map_add(char *s, struct dl_blg_map_entry *e)
+{
+    char *name, *tok;
+    unsigned long v[7];
+    int i = 0, n = 0;
+    name = next_token(&s);
+    if (!name || !*name) return -1;
+    while (name[n] && n < DL_BLG_MAP_NAME - 1) {
+        e->name[n] = name[n]; n++;
+    }
+    e->name[n] = '\0';
+    while (i < 7 && (tok = next_token(&s)) != NULL) {
+        if (parse_ulong(tok, &v[i])) return -1;
+        i++;
+    }
+    if (i != 7 || next_token(&s)) return -1;
+    e->cache_offset = v[0];
+    e->image_size = v[1];
+    e->target_major = v[2];
+    e->target_minor = v[3];
+    e->target_size = v[4];
+    e->flags = v[5];
+    e->tier = v[6];
     return 0;
 }
 
@@ -416,6 +458,39 @@ static void clear_cache_digest(void)
     for (i = 0; i < 32; i++) blg_cache_sha256[i] = 0;
 }
 
+static void clear_blg_map(void)
+{
+    unsigned int i, j;
+    for (i = 0; i < DL_BLG_MAP_MAX; i++) {
+        for (j = 0; j < sizeof(blg_map[i]); j++)
+            ((unsigned char *)&blg_map[i])[j] = 0;
+    }
+    for (i = 0; i < 32; i++) blg_map_sha256[i] = 0;
+    blg_map_count = 0;
+    blg_map_ready = 0;
+}
+
+static int validate_blg_map(void)
+{
+    unsigned int i, j;
+    unsigned long long end;
+    if (!blg_cache || !blg_cache_ready || !blg_cache_ro || !blg_map_count)
+        return -1;
+    for (i = 0; i < blg_map_count; i++) {
+        struct dl_blg_map_entry *e = &blg_map[i];
+        if (!e->name[0] || !e->image_size || !e->target_major ||
+            e->image_size > e->target_size)
+            return -1;
+        end = e->cache_offset + e->image_size;
+        if (end < e->cache_offset || end > blg_cache_size) return -1;
+        for (j = 0; j < i; j++)
+            if (e->target_major == blg_map[j].target_major &&
+                e->target_minor == blg_map[j].target_minor)
+                return -1;
+    }
+    return 0;
+}
+
 static int free_blg_cache(void)
 {
     int pages, rc;
@@ -431,6 +506,7 @@ static int free_blg_cache(void)
     blg_cache_size = blg_cache_written = 0;
     blg_cache_ready = 0;
     clear_cache_digest();
+    clear_blg_map();
     return 0;
 }
 
@@ -465,7 +541,7 @@ static ssize_t control_write(struct file *file, const char __user *buf,
                       "ERR KPM_OLD" : "ERR CLI_OLD");
         } else {
             hello_tgid = current_id(1);
-            set_reply("OK HELLO 7 2 0.8.4-ro-cache-test");
+            set_reply("OK HELLO 8 2 0.8.5-image-map-test");
         }
         return n;
     }
@@ -506,7 +582,43 @@ static ssize_t control_write(struct file *file, const char __user *buf,
         return -13;
     }
 
-    if (prefix(cmd, "BLG CACHE BEGIN ")) {
+    if (streq(cmd, "BLG MAP BEGIN")) {
+        if (state == DL_SEALED) { set_reply("ERR SEALED"); return -1; }
+        clear_blg_map();
+        set_reply("OK MAP BEGIN");
+    } else if (prefix(cmd, "BLG MAP ADD ")) {
+        if (state == DL_SEALED || blg_map_ready) {
+            set_reply("ERR MAP LOCKED"); return -1;
+        }
+        if (blg_map_count >= DL_BLG_MAP_MAX ||
+            parse_map_add(cmd + 12, &blg_map[blg_map_count])) {
+            set_reply("ERR MAP ENTRY"); return -22;
+        }
+        blg_map_count++;
+        set_reply("OK MAP ADD");
+    } else if (streq(cmd, "BLG MAP COMMIT")) {
+        if (validate_blg_map()) {
+            set_reply("ERR MAP INVALID"); return -22;
+        }
+        fn_sha256((unsigned char *)blg_map,
+                  blg_map_count * sizeof(blg_map[0]), blg_map_sha256);
+        blg_map_ready = 1;
+        set_reply("OK PLAN READY NO WRITE");
+    } else if (streq(cmd, "BLG MAP VERIFY")) {
+        unsigned char digest[32];
+        if (!blg_map_ready) { set_reply("ERR MAP NOT READY"); return -22; }
+        fn_sha256((unsigned char *)blg_map,
+                  blg_map_count * sizeof(blg_map[0]), digest);
+        set_reply(digest_equal(digest, blg_map_sha256) ?
+                  "OK MAP INTACT" : "ERR MAP CORRUPTED");
+    } else if (streq(cmd, "BLG MAP STATUS")) {
+        set_reply(blg_map_ready ? "OK PLAN READY NO WRITE" :
+                  blg_map_count ? "OK MAP BUILDING" : "OK MAP EMPTY");
+    } else if (streq(cmd, "BLG MAP DROP")) {
+        if (state == DL_SEALED) { set_reply("ERR SEALED"); return -1; }
+        clear_blg_map();
+        set_reply("OK MAP EMPTY");
+    } else if (prefix(cmd, "BLG CACHE BEGIN ")) {
         unsigned long size;
         if (state == DL_SEALED) { set_reply("ERR SEALED"); return -1; }
         if (parse_ulong(cmd + 16, &size) || !size || size > DL_BLG_CACHE_MAX) {
@@ -1063,6 +1175,7 @@ static long dynalab_init(const char *args, const char *event, void *__user reser
     blg_cache_size = blg_cache_written = 0;
     blg_cache_ready = blg_cache_ro = 0;
     clear_cache_digest();
+    clear_blg_map();
     clear_subjects();
     set_reply("UNINITIALIZED");
     dl_log("init event=%s default=AUTO state=READY\n", event ? event : "?");

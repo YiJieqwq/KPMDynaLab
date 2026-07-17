@@ -2,11 +2,27 @@
 #ifndef KPM_DYNALAB_RPC_H
 #define KPM_DYNALAB_RPC_H
 
-#define DL_RPC_API_VERSION 7
-#define DL_RPC_MIN_CLI_API 7
+#define DL_RPC_API_VERSION 8
+#define DL_RPC_MIN_CLI_API 8
 #define DL_EVENT_ABI_VERSION 2
 #define DL_EVENT_MAGIC 0x444c4556u /* DLEV */
 #define DL_EVENT_CAPACITY 256
+#define DL_BLG_MAP_MAX 64
+#define DL_BLG_MAP_NAME 32
+#define DL_BLG_FLAG_AB       (1u << 0)
+#define DL_BLG_FLAG_SHARED   (1u << 1)
+#define DL_BLG_FLAG_EFISP    (1u << 2)
+
+struct dl_blg_map_entry {
+    char name[DL_BLG_MAP_NAME];
+    unsigned int flags;
+    unsigned int tier;
+    unsigned long long cache_offset;
+    unsigned long long image_size;
+    unsigned long long target_size;
+    unsigned int target_major;
+    unsigned int target_minor;
+};
 
 enum dl_wire_event_type {
     DL_WIRE_BLOCK_WRITE = 1,
