@@ -694,7 +694,8 @@ static int blg_selftest(void)
     unsigned long long size;
     struct timespec begin, end;
     FILE *pipe;
-    int fd, rc = 1;
+    int fd, rc = 1, rpc_rc;
+    reply[0] = '\0';
 
     if (!blg_ready() && blg_prepare()) return 1;
     size = blg_unique_pack_size();
@@ -723,9 +724,13 @@ static int blg_selftest(void)
            loopdev, size);
     snprintf(command, sizeof(command), "BLG SELFTEST %s INJECT", loopdev);
     clock_gettime(CLOCK_MONOTONIC, &begin);
-    if (rpc(command, reply, sizeof(reply)) < 0 ||
-        strncmp(reply, "OK SELFTEST REPAIRED", 20)) {
-        printf("BLG self-test failed: %s\n", reply);
+    rpc_rc = rpc(command, reply, sizeof(reply));
+    if (rpc_rc < 0) {
+        printf("BLG self-test RPC failed: %s (%d)\n", strerror(-rpc_rc), rpc_rc);
+        goto out;
+    }
+    if (strncmp(reply, "OK SELFTEST REPAIRED", 20)) {
+        printf("BLG self-test failed: %s\n", reply[0] ? reply : "unknown KPM error");
         goto out;
     }
     clock_gettime(CLOCK_MONOTONIC, &end);
@@ -877,7 +882,7 @@ int main(int argc, char **argv)
     }
 
     use_color = isatty(STDOUT_FILENO) && getenv("NO_COLOR") == NULL;
-    printf("%s%sKPMDynaLab%s %sv0.8.7-loop-writer-test%s\n",
+    printf("%s%sKPMDynaLab%s %sv0.8.7.1-loop-writer-diag%s\n",
            clr(C_BOLD), clr(C_CYAN), clr(C_RESET), clr(C_DIM), clr(C_RESET));
     printf("%sKernel-assisted dynamic analysis laboratory%s\n\n",
            clr(C_DIM), clr(C_RESET));

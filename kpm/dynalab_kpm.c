@@ -63,7 +63,7 @@ extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
 #define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.8.7-loop-writer-test");
+KPM_VERSION("0.8.7.1-loop-writer-diag");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("YiJieqwq");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
@@ -533,8 +533,9 @@ static int blg_loop_selftest(const char *path, int inject)
     unsigned long long total = 0, out_off = 0;
     loff_t pos;
     unsigned int i, j;
+    ssize_t io;
     int rc = -5, repaired = 0;
-    if (!blg_cache_ready || !blg_cache_ro || !blg_map_ready) return -22;
+    if (!blg_cache_ready || !blg_cache_ro || !blg_map_ready) return -101;
     if (!path || path[0] != '/') return -22;
     file = fn_filp_open(path, O_RDWR | O_LARGEFILE, 0);
     if (!file || IS_ERR(file)) return -2;
@@ -555,19 +556,28 @@ static int blg_loop_selftest(const char *path, int inject)
         while (left) {
             size_t chunk = left > 1024 * 1024 ? 1024 * 1024 : (size_t)left;
             pos = (loff_t)out_off;
-            if (fn_kernel_write(file, (char *)blg_cache + src, chunk, &pos) != chunk)
-                goto out;
+            io = fn_kernel_write(file, (char *)blg_cache + src, chunk, &pos);
+            if (io != chunk) {
+                dl_log("SELFTEST stage=initial-write rc=%lld off=%llu len=%zu\n",
+                       (long long)io, out_off, chunk);
+                rc = -110; goto out;
+            }
             src += chunk; out_off += chunk; left -= chunk;
         }
     }
-    if (fn_vfs_fsync(file, 0)) goto out;
+    rc = fn_vfs_fsync(file, 0);
+    if (rc) { dl_log("SELFTEST stage=initial-fsync rc=%d\n", rc); rc = -111; goto out; }
 
     if (inject && total >= sizeof(zeros)) {
         for (j = 0; j < sizeof(zeros); j++) zeros[j] = 0;
         pos = (loff_t)((total / 2) & ~4095ULL);
-        if (fn_kernel_write(file, zeros, sizeof(zeros), &pos) != sizeof(zeros))
-            goto out;
-        if (fn_vfs_fsync(file, 0)) goto out;
+        io = fn_kernel_write(file, zeros, sizeof(zeros), &pos);
+        if (io != sizeof(zeros)) {
+            dl_log("SELFTEST stage=inject-write rc=%lld\n", (long long)io);
+            rc = -112; goto out;
+        }
+        rc = fn_vfs_fsync(file, 0);
+        if (rc) { dl_log("SELFTEST stage=inject-fsync rc=%d\n", rc); rc = -113; goto out; }
     }
 
     out_off = 0;
@@ -577,17 +587,29 @@ static int blg_loop_selftest(const char *path, int inject)
         while (left) {
             size_t chunk = left > 1024 * 1024 ? 1024 * 1024 : (size_t)left;
             pos = (loff_t)out_off;
-            if (fn_kernel_read(file, verify, chunk, &pos) != chunk) goto out;
+            io = fn_kernel_read(file, verify, chunk, &pos);
+            if (io != chunk) {
+                dl_log("SELFTEST stage=detect-read rc=%lld off=%llu len=%zu\n",
+                       (long long)io, out_off, chunk);
+                rc = -120; goto out;
+            }
             if (!bytes_equal(verify, (unsigned char *)blg_cache + src, chunk)) {
                 pos = (loff_t)out_off;
-                if (fn_kernel_write(file, (char *)blg_cache + src, chunk, &pos) != chunk)
-                    goto out;
+                io = fn_kernel_write(file, (char *)blg_cache + src, chunk, &pos);
+                if (io != chunk) {
+                    dl_log("SELFTEST stage=repair-write rc=%lld off=%llu len=%zu\n",
+                           (long long)io, out_off, chunk);
+                    rc = -121; goto out;
+                }
                 repaired++;
             }
             src += chunk; out_off += chunk; left -= chunk;
         }
     }
-    if (repaired && fn_vfs_fsync(file, 0)) goto out;
+    if (repaired) {
+        rc = fn_vfs_fsync(file, 0);
+        if (rc) { dl_log("SELFTEST stage=repair-fsync rc=%d\n", rc); rc = -122; goto out; }
+    }
 
     out_off = 0;
     for (i = 0; i < blg_map_count; i++) {
@@ -596,9 +618,14 @@ static int blg_loop_selftest(const char *path, int inject)
         while (left) {
             size_t chunk = left > 1024 * 1024 ? 1024 * 1024 : (size_t)left;
             pos = (loff_t)out_off;
-            if (fn_kernel_read(file, verify, chunk, &pos) != chunk ||
-                !bytes_equal(verify, (unsigned char *)blg_cache + src, chunk))
-                goto out;
+            io = fn_kernel_read(file, verify, chunk, &pos);
+            if (io != chunk ||
+                !bytes_equal(verify, (unsigned char *)blg_cache + src, chunk)) {
+                dl_log("SELFTEST stage=final-verify rc=%lld off=%llu len=%zu equal=%d\n",
+                       (long long)io, out_off, chunk,
+                       io == chunk ? bytes_equal(verify, (unsigned char *)blg_cache + src, chunk) : 0);
+                rc = -130; goto out;
+            }
             src += chunk; out_off += chunk; left -= chunk;
         }
     }
@@ -640,7 +667,7 @@ static ssize_t control_write(struct file *file, const char __user *buf,
                       "ERR KPM_OLD" : "ERR CLI_OLD");
         } else {
             hello_tgid = current_id(1);
-            set_reply("OK HELLO 9 2 0.8.7-loop-writer-test");
+            set_reply("OK HELLO 9 2 0.8.7.1-loop-writer-diag");
         }
         return n;
     }
