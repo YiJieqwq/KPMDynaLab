@@ -63,7 +63,7 @@ extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
 #define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.8.5-image-map-test");
+KPM_VERSION("0.8.7-loop-writer-test");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("YiJieqwq");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
@@ -88,6 +88,13 @@ static void (*fn_sha256)(const unsigned char *data, unsigned int len,
                          unsigned char *out);
 static void *(*fn_vmalloc)(unsigned long size);
 static void (*fn_vfree)(const void *addr);
+static struct file *(*fn_filp_open)(const char *filename, int flags, umode_t mode);
+static int (*fn_filp_close)(struct file *filp, fl_owner_t id);
+static ssize_t (*fn_kernel_write)(struct file *file, const void *buf,
+                                  size_t count, loff_t *pos);
+static ssize_t (*fn_kernel_read)(struct file *file, void *buf,
+                                 size_t count, loff_t *pos);
+static int (*fn_vfs_fsync)(struct file *file, int datasync);
 static int (*fn_kern_path)(const char *name, unsigned int flags, struct path *path);
 static void (*fn_path_put)(const struct path *path);
 static pid_t (*fn_task_pid_nr)(struct task_struct *task, int type,
@@ -510,6 +517,98 @@ static int free_blg_cache(void)
     return 0;
 }
 
+static int bytes_equal(const unsigned char *a, const unsigned char *b, size_t n)
+{
+    size_t i;
+    for (i = 0; i < n; i++) if (a[i] != b[i]) return 0;
+    return 1;
+}
+
+static int blg_loop_selftest(const char *path, int inject)
+{
+    struct file *file;
+    struct inode *inode;
+    unsigned char *verify = NULL;
+    unsigned char zeros[4096];
+    unsigned long long total = 0, out_off = 0;
+    loff_t pos;
+    unsigned int i, j;
+    int rc = -5, repaired = 0;
+    if (!blg_cache_ready || !blg_cache_ro || !blg_map_ready) return -22;
+    if (!path || path[0] != '/') return -22;
+    file = fn_filp_open(path, O_RDWR | O_LARGEFILE, 0);
+    if (!file || IS_ERR(file)) return -2;
+    inode = file_inode(file);
+    if (!inode || !S_ISBLK(inode->i_mode) || MAJOR(inode->i_rdev) != 7) {
+        rc = -1; goto out;
+    }
+    for (i = 0; i < blg_map_count; i++) total += blg_map[i].image_size;
+    if (!total || total > (unsigned long long)i_size_read(inode)) {
+        rc = -27; goto out;
+    }
+    verify = fn_vmalloc(1024 * 1024);
+    if (!verify) { rc = -12; goto out; }
+
+    for (i = 0; i < blg_map_count; i++) {
+        unsigned long long left = blg_map[i].image_size;
+        unsigned long long src = blg_map[i].cache_offset;
+        while (left) {
+            size_t chunk = left > 1024 * 1024 ? 1024 * 1024 : (size_t)left;
+            pos = (loff_t)out_off;
+            if (fn_kernel_write(file, (char *)blg_cache + src, chunk, &pos) != chunk)
+                goto out;
+            src += chunk; out_off += chunk; left -= chunk;
+        }
+    }
+    if (fn_vfs_fsync(file, 0)) goto out;
+
+    if (inject && total >= sizeof(zeros)) {
+        for (j = 0; j < sizeof(zeros); j++) zeros[j] = 0;
+        pos = (loff_t)((total / 2) & ~4095ULL);
+        if (fn_kernel_write(file, zeros, sizeof(zeros), &pos) != sizeof(zeros))
+            goto out;
+        if (fn_vfs_fsync(file, 0)) goto out;
+    }
+
+    out_off = 0;
+    for (i = 0; i < blg_map_count; i++) {
+        unsigned long long left = blg_map[i].image_size;
+        unsigned long long src = blg_map[i].cache_offset;
+        while (left) {
+            size_t chunk = left > 1024 * 1024 ? 1024 * 1024 : (size_t)left;
+            pos = (loff_t)out_off;
+            if (fn_kernel_read(file, verify, chunk, &pos) != chunk) goto out;
+            if (!bytes_equal(verify, (unsigned char *)blg_cache + src, chunk)) {
+                pos = (loff_t)out_off;
+                if (fn_kernel_write(file, (char *)blg_cache + src, chunk, &pos) != chunk)
+                    goto out;
+                repaired++;
+            }
+            src += chunk; out_off += chunk; left -= chunk;
+        }
+    }
+    if (repaired && fn_vfs_fsync(file, 0)) goto out;
+
+    out_off = 0;
+    for (i = 0; i < blg_map_count; i++) {
+        unsigned long long left = blg_map[i].image_size;
+        unsigned long long src = blg_map[i].cache_offset;
+        while (left) {
+            size_t chunk = left > 1024 * 1024 ? 1024 * 1024 : (size_t)left;
+            pos = (loff_t)out_off;
+            if (fn_kernel_read(file, verify, chunk, &pos) != chunk ||
+                !bytes_equal(verify, (unsigned char *)blg_cache + src, chunk))
+                goto out;
+            src += chunk; out_off += chunk; left -= chunk;
+        }
+    }
+    rc = repaired ? 1 : 0;
+out:
+    if (verify) fn_vfree(verify);
+    fn_filp_close(file, NULL);
+    return rc;
+}
+
 static ssize_t control_write(struct file *file, const char __user *buf,
                              size_t count, loff_t *ppos)
 {
@@ -541,7 +640,7 @@ static ssize_t control_write(struct file *file, const char __user *buf,
                       "ERR KPM_OLD" : "ERR CLI_OLD");
         } else {
             hello_tgid = current_id(1);
-            set_reply("OK HELLO 8 2 0.8.5-image-map-test");
+            set_reply("OK HELLO 9 2 0.8.7-loop-writer-test");
         }
         return n;
     }
@@ -582,7 +681,21 @@ static ssize_t control_write(struct file *file, const char __user *buf,
         return -13;
     }
 
-    if (streq(cmd, "BLG MAP BEGIN")) {
+    if (prefix(cmd, "BLG SELFTEST ")) {
+        char *p = cmd + 13;
+        char *space = p;
+        int inject = 0, rc;
+        if (state == DL_SEALED) { set_reply("ERR SEALED"); return -1; }
+        while (*space && *space != ' ') space++;
+        if (*space) {
+            *space++ = '\0';
+            inject = streq(space, "INJECT");
+            if (!inject) { set_reply("ERR SELFTEST ARG"); return -22; }
+        }
+        rc = blg_loop_selftest(p, inject);
+        if (rc < 0) { set_reply("ERR SELFTEST"); return rc; }
+        set_reply(rc ? "OK SELFTEST REPAIRED" : "OK SELFTEST VERIFIED");
+    } else if (streq(cmd, "BLG MAP BEGIN")) {
         if (state == DL_SEALED) { set_reply("ERR SEALED"); return -1; }
         clear_blg_map();
         set_reply("OK MAP BEGIN");
@@ -1190,16 +1303,24 @@ static long dynalab_init(const char *args, const char *event, void *__user reser
     fn_set_memory_ro = (void *)kp_lookup_name("set_memory_ro");
     fn_set_memory_rw = (void *)kp_lookup_name("set_memory_rw");
     fn_sha256 = (void *)kp_lookup_name("sha256");
+    fn_filp_open = (void *)kp_lookup_name("filp_open");
+    fn_filp_close = (void *)kp_lookup_name("filp_close");
+    fn_kernel_write = (void *)kp_lookup_name("kernel_write");
+    fn_kernel_read = (void *)kp_lookup_name("kernel_read");
+    fn_vfs_fsync = (void *)kp_lookup_name("vfs_fsync");
     fn_copy_from_user = (void *)kp_lookup_name("_copy_from_user");
     if (!fn_copy_from_user)
         fn_copy_from_user = (void *)kp_lookup_name("raw_copy_from_user");
     if (!fn_iov_iter_advance || !fn_task_pid_nr || !fn_vmalloc ||
         !fn_vfree || !fn_copy_from_user || !fn_set_memory_ro ||
-        !fn_set_memory_rw || !fn_sha256) {
-        dl_log("ERROR: helper missing iov=%d pid=%d vmalloc=%d vfree=%d copy=%d ro=%d rw=%d sha=%d\n",
+        !fn_set_memory_rw || !fn_sha256 || !fn_filp_open || !fn_filp_close ||
+        !fn_kernel_write || !fn_kernel_read || !fn_vfs_fsync) {
+        dl_log("ERROR: helper missing iov=%d pid=%d vmalloc=%d vfree=%d copy=%d ro=%d rw=%d sha=%d file=%d io=%d sync=%d\n",
                !!fn_iov_iter_advance, !!fn_task_pid_nr, !!fn_vmalloc,
                !!fn_vfree, !!fn_copy_from_user, !!fn_set_memory_ro,
-               !!fn_set_memory_rw, !!fn_sha256);
+               !!fn_set_memory_rw, !!fn_sha256,
+               !!fn_filp_open && !!fn_filp_close,
+               !!fn_kernel_write && !!fn_kernel_read, !!fn_vfs_fsync);
         return -2;
     }
     detect_efisp_device();

@@ -658,6 +658,89 @@ static int blg_prepare(void)
     return 0;
 }
 
+static unsigned long long blg_unique_pack_size(void)
+{
+    struct dirent **entries = NULL;
+    dev_t devs[64]; ino_t inos[64];
+    char directory[320], path[384];
+    struct stat st;
+    unsigned long long total = 0;
+    int count, used = 0, i, j;
+    snprintf(directory, sizeof(directory), "%s/images", BLG_VAULT);
+    count = scandir(directory, &entries, NULL, alphasort);
+    if (count < 0) return 0;
+    for (i = 0; i < count; i++) {
+        size_t n = strlen(entries[i]->d_name);
+        int dup = 0;
+        if (n < 5 || strcmp(entries[i]->d_name + n - 4, ".img")) continue;
+        snprintf(path, sizeof(path), "%s/%s", directory, entries[i]->d_name);
+        if (stat(path, &st) || !S_ISREG(st.st_mode)) continue;
+        for (j = 0; j < used; j++)
+            if (devs[j] == st.st_dev && inos[j] == st.st_ino) dup = 1;
+        if (!dup && used < 64) {
+            devs[used] = st.st_dev; inos[used] = st.st_ino; used++;
+            total += st.st_size;
+        }
+    }
+    for (i = 0; i < count; i++) free(entries[i]);
+    free(entries);
+    return total;
+}
+
+static int blg_selftest(void)
+{
+    const char *image = "/data/local/tmp/dynalab-blg-selftest.img";
+    char loopdev[128] = {0}, command[512], reply[256];
+    unsigned long long size;
+    struct timespec begin, end;
+    FILE *pipe;
+    int fd, rc = 1;
+
+    if (!blg_ready() && blg_prepare()) return 1;
+    size = blg_unique_pack_size();
+    if (!size) { puts("Cannot determine self-test size."); return 1; }
+    fd = open(image, O_CREAT | O_TRUNC | O_RDWR | O_CLOEXEC, 0600);
+    if (fd < 0) { perror(image); return 1; }
+    if (ftruncate(fd, (off_t)(size + 1024 * 1024))) {
+        perror("ftruncate self-test"); close(fd); unlink(image); return 1;
+    }
+    close(fd);
+
+    pipe = popen("losetup -f", "r");
+    if (!pipe || !fgets(loopdev, sizeof(loopdev), pipe)) {
+        if (pipe) pclose(pipe);
+        puts("No free loop device."); unlink(image); return 1;
+    }
+    pclose(pipe);
+    loopdev[strcspn(loopdev, "\r\n")] = '\0';
+    if (strncmp(loopdev, "/dev/block/loop", 15)) {
+        puts("Unexpected loop device path."); unlink(image); return 1;
+    }
+    snprintf(command, sizeof(command), "losetup '%s' '%s'", loopdev, image);
+    if (run_shell(command)) { unlink(image); return 1; }
+
+    printf("BLG loop self-test: %s (%llu bytes, injected corruption enabled)\n",
+           loopdev, size);
+    snprintf(command, sizeof(command), "BLG SELFTEST %s INJECT", loopdev);
+    clock_gettime(CLOCK_MONOTONIC, &begin);
+    if (rpc(command, reply, sizeof(reply)) < 0 ||
+        strncmp(reply, "OK SELFTEST REPAIRED", 20)) {
+        printf("BLG self-test failed: %s\n", reply);
+        goto out;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    printf("%s\n", reply);
+    printf("Write + flush + detect + repair + full verify: %.3f seconds\n",
+           (end.tv_sec - begin.tv_sec) +
+           (end.tv_nsec - begin.tv_nsec) / 1000000000.0);
+    rc = 0;
+out:
+    snprintf(command, sizeof(command), "losetup -d '%s'", loopdev);
+    run_shell(command);
+    unlink(image);
+    return rc;
+}
+
 static int blg_verify_all(void)
 {
     char reply[256];
@@ -725,6 +808,7 @@ static void help(void)
     puts("  blg setup              rebuild pack and prepare BLG");
     puts("  blg prepare            load/validate BLG if needed");
     puts("  blg verify             verify pack, RAM cache and image map");
+    puts("  blg selftest           run loop-backed write/repair verification");
     puts("  blg release            release BLG RAM cache before SEALED");
     puts("  blg advanced           show low-level BLG commands");
     puts("  clear                  clear event ring (not while SEALED)");
@@ -793,7 +877,7 @@ int main(int argc, char **argv)
     }
 
     use_color = isatty(STDOUT_FILENO) && getenv("NO_COLOR") == NULL;
-    printf("%s%sKPMDynaLab%s %sv0.8.6-cli-test%s\n",
+    printf("%s%sKPMDynaLab%s %sv0.8.7-loop-writer-test%s\n",
            clr(C_BOLD), clr(C_CYAN), clr(C_RESET), clr(C_DIM), clr(C_RESET));
     printf("%sKernel-assisted dynamic analysis laboratory%s\n\n",
            clr(C_DIM), clr(C_RESET));
@@ -873,6 +957,8 @@ int main(int argc, char **argv)
                 blg_prepare();
             else if (!strcmp(arg, "verify"))
                 blg_verify_all();
+            else if (!strcmp(arg, "selftest"))
+                blg_selftest();
             else if (!strcmp(arg, "release"))
                 send_and_print("BLG CACHE DROP");
             else if (!strcmp(arg, "advanced"))
