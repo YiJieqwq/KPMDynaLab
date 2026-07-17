@@ -325,6 +325,17 @@ static int blg_pack_create(void)
     return run_shell(script);
 }
 
+static int blg_pack_verify_quiet(void)
+{
+    static const char script[] =
+        "set -eu\n"
+        "V='" BLG_VAULT "'\n"
+        "[ -r \"$V/manifest.sha256\" ]\n"
+        "cd \"$V\"\n"
+        "sha256sum -c manifest.sha256 >/dev/null\n";
+    return run_shell(script);
+}
+
 static int blg_pack_verify(void)
 {
     static const char script[] =
@@ -489,7 +500,7 @@ static int read_full_fd(int fd, void *buf, size_t len)
     return 0;
 }
 
-static int blg_cache_load(void)
+static int blg_cache_load(int verbose)
 {
     struct dirent **entries = NULL;
     struct blg_cache_source src[64];
@@ -501,7 +512,7 @@ static int blg_cache_load(void)
     int count, used = 0, i, j, cache_fd = -1, rc = 1;
     reply[0] = '\0';
 
-    if (blg_pack_verify()) return 1;
+    if ((verbose ? blg_pack_verify() : blg_pack_verify_quiet())) return 1;
     snprintf(directory, sizeof(directory), "%s/images", BLG_VAULT);
     count = scandir(directory, &entries, NULL, alphasort);
     if (count < 0) { perror("scandir Recovery Pack"); return 1; }
@@ -549,7 +560,8 @@ static int blg_cache_load(void)
         int fd = open(src[i].path, O_RDONLY | O_CLOEXEC);
         off_t left = src[i].size;
         if (fd < 0) { perror(src[i].path); goto out; }
-        printf("  loading %s (%lld bytes)\n", src[i].path, (long long)left);
+        if (verbose)
+            printf("  loading %s (%lld bytes)\n", src[i].path, (long long)left);
         while (left) {
             size_t chunk = left > 1024 * 1024 ? 1024 * 1024 : (size_t)left;
             if (read_full_fd(fd, in, chunk) || write_all_fd(cache_fd, in, chunk)) {
@@ -618,6 +630,54 @@ static void blg_cache_status(void)
         printf("BLG RAM Cache: %s\n", reply);
 }
 
+static int blg_ready(void)
+{
+    char cache[256], map[256];
+    return !rpc("BLG CACHE STATUS", cache, sizeof(cache)) &&
+           !rpc("BLG MAP STATUS", map, sizeof(map)) &&
+           !strncmp(cache, "OK CACHE READY RO", 17) &&
+           !strncmp(map, "OK PLAN READY NO WRITE", 22);
+}
+
+static int blg_prepare(void)
+{
+    if (blg_ready()) {
+        puts("Boot Lifeguard: READY");
+        return 0;
+    }
+    if (!blg_pack_present()) {
+        puts("Boot Lifeguard: NOT CONFIGURED");
+        return 1;
+    }
+    puts("Preparing Boot Lifeguard...");
+    if (blg_cache_load(0)) {
+        puts("Boot Lifeguard: PREPARE FAILED");
+        return 1;
+    }
+    puts("Boot Lifeguard: READY");
+    return 0;
+}
+
+static int blg_verify_all(void)
+{
+    char reply[256];
+    if (blg_pack_verify_quiet()) {
+        puts("Recovery Pack: INVALID"); return 1;
+    }
+    puts("Recovery Pack: VERIFIED");
+    if (rpc("BLG CACHE VERIFY", reply, sizeof(reply)) < 0 ||
+        strncmp(reply, "OK CACHE INTACT", 15)) {
+        printf("RAM Cache: %s\n", reply); return 1;
+    }
+    puts("RAM Cache: INTACT");
+    if (rpc("BLG MAP VERIFY", reply, sizeof(reply)) < 0 ||
+        strncmp(reply, "OK MAP INTACT", 13)) {
+        printf("Image Map: %s\n", reply); return 1;
+    }
+    puts("Image Map: INTACT");
+    return 0;
+}
+
 static void blg_pack_status(void)
 {
     if (!blg_pack_present()) {
@@ -661,16 +721,12 @@ static void help(void)
     puts("  seal                   activate selected profile");
     puts("  stop                   authenticated stop/reset");
     puts("  events                 dump kernel event ring");
-    puts("  blg status             show Recovery Pack status");
-    puts("  blg pack create        extract and verify a Recovery Pack");
-    puts("  blg pack verify        verify Recovery Pack hashes");
-    puts("  blg cache load         upload and verify KPM RAM Cache");
-    puts("  blg cache status       show KPM RAM Cache state");
-    puts("  blg cache verify       verify KPM RAM Cache SHA-256");
-    puts("  blg cache drop         release KPM RAM Cache");
-    puts("  blg map status         show immutable write-plan state");
-    puts("  blg map verify         verify Image Map SHA-256");
-    puts("  blg map drop           clear Image Map before SEALED");
+    puts("  blg status             show BLG state");
+    puts("  blg setup              rebuild pack and prepare BLG");
+    puts("  blg prepare            load/validate BLG if needed");
+    puts("  blg verify             verify pack, RAM cache and image map");
+    puts("  blg release            release BLG RAM cache before SEALED");
+    puts("  blg advanced           show low-level BLG commands");
     puts("  clear                  clear event ring (not while SEALED)");
     puts("  run <program> [args]   seal and execute target");
     puts("  help");
@@ -737,7 +793,7 @@ int main(int argc, char **argv)
     }
 
     use_color = isatty(STDOUT_FILENO) && getenv("NO_COLOR") == NULL;
-    printf("%s%sKPMDynaLab%s %sv0.8.5-image-map-test%s\n",
+    printf("%s%sKPMDynaLab%s %sv0.8.6-cli-test%s\n",
            clr(C_BOLD), clr(C_CYAN), clr(C_RESET), clr(C_DIM), clr(C_RESET));
     printf("%sKernel-assisted dynamic analysis laboratory%s\n\n",
            clr(C_DIM), clr(C_RESET));
@@ -761,6 +817,7 @@ int main(int argc, char **argv)
         return 1;
     blg_efisp_arm();
     blg_first_run_prompt();
+    if (blg_pack_present()) blg_prepare();
 
     while (1) {
         char *cmd, *arg;
@@ -809,12 +866,23 @@ int main(int argc, char **argv)
         } else if (!strcmp(cmd, "blg") && arg) {
             if (!strcmp(arg, "status"))
                 blg_pack_status();
+            else if (!strcmp(arg, "setup")) {
+                if (!send_and_print("BLG CACHE DROP") &&
+                    !blg_pack_create()) blg_prepare();
+            } else if (!strcmp(arg, "prepare"))
+                blg_prepare();
+            else if (!strcmp(arg, "verify"))
+                blg_verify_all();
+            else if (!strcmp(arg, "release"))
+                send_and_print("BLG CACHE DROP");
+            else if (!strcmp(arg, "advanced"))
+                puts("Advanced: blg pack create/verify | blg cache load/status/verify/drop | blg map status/verify/drop");
             else if (!strcmp(arg, "pack create"))
                 blg_pack_create();
             else if (!strcmp(arg, "pack verify"))
                 blg_pack_verify();
             else if (!strcmp(arg, "cache load"))
-                blg_cache_load();
+                blg_cache_load(1);
             else if (!strcmp(arg, "cache status"))
                 blg_cache_status();
             else if (!strcmp(arg, "cache verify"))
@@ -828,7 +896,7 @@ int main(int argc, char **argv)
             else if (!strcmp(arg, "map drop"))
                 send_and_print("BLG MAP DROP");
             else
-                puts("Usage: blg status | blg pack create | blg pack verify | blg cache load/status/verify/drop | blg map status/verify/drop");
+                puts("Usage: blg status | setup | prepare | verify | release | advanced");
         } else if (!strcmp(cmd, "clear")) {
             send_and_print("CLEAR");
         } else if (!strcmp(cmd, "run") && arg) {

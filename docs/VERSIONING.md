@@ -12,7 +12,7 @@ Current test values:
 RPC API:   8
 Event ABI: 2
 KPM:       0.8.5-image-map-test
-CLI:       0.8.5-image-map-test
+CLI:       0.8.6-cli-test
 ```
 
 Before STATUS or LOGIN, CLI sends:
