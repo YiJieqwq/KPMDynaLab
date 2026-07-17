@@ -63,7 +63,7 @@ extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
 #define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.8.7.1-loop-writer-diag");
+KPM_VERSION("0.8.7.2-loop-capacity-fix");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("YiJieqwq");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
@@ -527,7 +527,7 @@ static int bytes_equal(const unsigned char *a, const unsigned char *b, size_t n)
 static int blg_loop_selftest(const char *path, int inject)
 {
     struct file *file;
-    struct inode *inode;
+    struct inode *inode, *capacity_inode;
     unsigned char *verify = NULL;
     unsigned char zeros[4096];
     unsigned long long total = 0, out_off = 0;
@@ -540,11 +540,15 @@ static int blg_loop_selftest(const char *path, int inject)
     file = fn_filp_open(path, O_RDWR | O_LARGEFILE, 0);
     if (!file || IS_ERR(file)) return -2;
     inode = file_inode(file);
-    if (!inode || !S_ISBLK(inode->i_mode) || MAJOR(inode->i_rdev) != 7) {
+    capacity_inode = file->f_mapping ? file->f_mapping->host : NULL;
+    if (!inode || !capacity_inode || !S_ISBLK(inode->i_mode) ||
+        MAJOR(inode->i_rdev) != 7) {
         rc = -1; goto out;
     }
     for (i = 0; i < blg_map_count; i++) total += blg_map[i].image_size;
-    if (!total || total > (unsigned long long)i_size_read(inode)) {
+    if (!total || total > (unsigned long long)i_size_read(capacity_inode)) {
+        dl_log("SELFTEST stage=capacity total=%llu capacity=%lld\n",
+               total, capacity_inode ? (long long)i_size_read(capacity_inode) : -1LL);
         rc = -27; goto out;
     }
     verify = fn_vmalloc(1024 * 1024);
@@ -667,7 +671,7 @@ static ssize_t control_write(struct file *file, const char __user *buf,
                       "ERR KPM_OLD" : "ERR CLI_OLD");
         } else {
             hello_tgid = current_id(1);
-            set_reply("OK HELLO 9 2 0.8.7.1-loop-writer-diag");
+            set_reply("OK HELLO 9 2 0.8.7.2-loop-capacity-fix");
         }
         return n;
     }
