@@ -63,7 +63,7 @@ extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
 #define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.8.7.4-ctl0-syntax-fix");
+KPM_VERSION("0.8.7.5-ctl0-error-semantics");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("YiJieqwq");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
@@ -170,6 +170,13 @@ static long ctl_reply(char __user *out_msg, int outlen, const char *msg)
     if (len > outlen)
         len = outlen;
     return compat_copy_to_user(out_msg, msg, len) > 0 ? 0 : -14;
+}
+
+static long ctl_error(char __user *out_msg, int outlen, long err,
+                      const char *msg)
+{
+    ctl_reply(out_msg, outlen, msg);
+    return err;
 }
 
 static void set_reply(const char *msg)
@@ -673,7 +680,7 @@ static ssize_t control_write(struct file *file, const char __user *buf,
                       "ERR KPM_OLD" : "ERR CLI_OLD");
         } else {
             hello_tgid = current_id(1);
-            set_reply("OK HELLO 9 2 0.8.7.4-ctl0-syntax-fix");
+            set_reply("OK HELLO 9 2 0.8.7.5-ctl0-error-semantics");
         }
         return n;
     }
@@ -1422,9 +1429,9 @@ static long dynalab_ctl0(const char *args, char __user *out_msg, int outlen)
 
     if (prefix(args, "SETUP ")) {
         if (login_configured)
-            return ctl_reply(out_msg, outlen, "ERR ALREADY INITIALIZED");
+            return ctl_error(out_msg, outlen, -1, "ALREADY SET");
         if (!args[6])
-            return ctl_reply(out_msg, outlen, "ERR SYNTAX: SETUP <password>");
+            return ctl_error(out_msg, outlen, -22, "SYNTAX ERROR");
         login_verifier = make_verifier(args + 6);
         login_configured = 1;
         authenticated_tgid = -1;
@@ -1435,9 +1442,9 @@ static long dynalab_ctl0(const char *args, char __user *out_msg, int outlen)
 
     if (prefix(args, "SETVER ")) {
         if (login_configured)
-            return ctl_reply(out_msg, outlen, "ERR ALREADY INITIALIZED");
+            return ctl_error(out_msg, outlen, -1, "ALREADY SET");
         if (parse_hex64(args + 7, &value))
-            return ctl_reply(out_msg, outlen, "ERR SYNTAX: SETVER <16-hex-digits>");
+            return ctl_error(out_msg, outlen, -22, "SYNTAX ERROR");
         login_verifier = value;
         login_configured = 1;
         authenticated_tgid = -1;
@@ -1472,8 +1479,7 @@ static long dynalab_ctl0(const char *args, char __user *out_msg, int outlen)
         return ctl_reply(out_msg, outlen, "OK RESET ALL");
     }
 
-    return ctl_reply(out_msg, outlen,
-        "ERR SYNTAX: STATUS | SETUP <password> | SETVER <hex64> | RESET | RESET ALL");
+    return ctl_error(out_msg, outlen, -22, "SYNTAX ERROR");
 }
 
 static long dynalab_exit(void *__user reserved)
