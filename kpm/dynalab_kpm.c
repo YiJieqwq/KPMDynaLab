@@ -63,7 +63,7 @@ extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
 #define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.8.7.2-loop-capacity-fix");
+KPM_VERSION("0.8.7.3-loop-injection-fix");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("YiJieqwq");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
@@ -572,9 +572,11 @@ static int blg_loop_selftest(const char *path, int inject)
     rc = fn_vfs_fsync(file, 0);
     if (rc) { dl_log("SELFTEST stage=initial-fsync rc=%d\n", rc); rc = -111; goto out; }
 
-    if (inject && total >= sizeof(zeros)) {
-        for (j = 0; j < sizeof(zeros); j++) zeros[j] = 0;
-        pos = (loff_t)((total / 2) & ~4095ULL);
+    if (inject && total >= sizeof(zeros) &&
+        blg_map_count && blg_map[0].image_size >= sizeof(zeros)) {
+        for (j = 0; j < sizeof(zeros); j++)
+            zeros[j] = ((unsigned char *)blg_cache)[blg_map[0].cache_offset + j] ^ 0xff;
+        pos = 0;
         io = fn_kernel_write(file, zeros, sizeof(zeros), &pos);
         if (io != sizeof(zeros)) {
             dl_log("SELFTEST stage=inject-write rc=%lld\n", (long long)io);
@@ -671,7 +673,7 @@ static ssize_t control_write(struct file *file, const char __user *buf,
                       "ERR KPM_OLD" : "ERR CLI_OLD");
         } else {
             hello_tgid = current_id(1);
-            set_reply("OK HELLO 9 2 0.8.7.2-loop-capacity-fix");
+            set_reply("OK HELLO 9 2 0.8.7.3-loop-injection-fix");
         }
         return n;
     }
