@@ -166,6 +166,8 @@ make
 
 ## License
 
+Copyright (C) 2026 YiJieqwq.
+
 GPL-2.0-only — See [LICENSE](LICENSE)
 
 ## Acknowledgments
