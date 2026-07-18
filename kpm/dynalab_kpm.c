@@ -9,6 +9,8 @@
 #include <linux/kallsyms.h>
 #include <linux/proc_fs.h>
 #include <linux/input.h>
+#include <linux/workqueue.h>
+#include <linux/timer.h>
 #include <uapi/linux/fs.h>
 #include "../include/dl_rpc.h"
 
@@ -64,7 +66,7 @@ extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
 #define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.8.8-gesture-observer-test");
+KPM_VERSION("0.8.9-gesture-arbitration-test");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("YiJieqwq");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
@@ -85,6 +87,19 @@ static unsigned long long (*fn_ktime_get_mono_fast_ns)(void);
 static unsigned char gesture_keys[7];
 static unsigned long long gesture_times[7];
 static unsigned int gesture_len;
+static struct delayed_work gesture_work;
+static volatile int gesture_pending;
+static struct workqueue_struct **fn_system_wq;
+static bool (*fn_queue_delayed_work_on)(int cpu, struct workqueue_struct *wq,
+                                        struct delayed_work *dwork,
+                                        unsigned long delay);
+static bool (*fn_cancel_delayed_work)(struct delayed_work *dwork);
+static bool (*fn_cancel_delayed_work_sync)(struct delayed_work *dwork);
+static void (*fn_init_timer_key)(struct timer_list *timer,
+                                 void (*func)(struct timer_list *),
+                                 unsigned int flags, const char *name,
+                                 struct lock_class_key *key);
+static void (*fn_delayed_work_timer_fn)(struct timer_list *timer);
 static void (*fn_iov_iter_advance)(struct iov_iter *i, size_t bytes);
 static unsigned long (*fn_copy_from_user)(void *to, const void __user *from,
                                           unsigned long n);
@@ -464,8 +479,57 @@ static int gesture_suffix(const unsigned char *pattern, unsigned int n,
 static void gesture_event(const char *name, unsigned int command)
 {
     add_event_for(DL_WIRE_GESTURE, DL_WIRE_PASS,
-                  current_id(0), current_id(1), 0, 0, 0, 0, command,
+                  0, 0, 0, 0, 0, 0, command,
                   0, DL_SCOPE_GLOBAL, name);
+}
+
+static int gesture_pending_xchg(int value)
+{
+    return __atomic_exchange_n(&gesture_pending, value, __ATOMIC_SEQ_CST);
+}
+
+static int gesture_pending_cmpxchg(int expected, int value)
+{
+    __atomic_compare_exchange_n(&gesture_pending, &expected, value, 0,
+                                __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    return expected;
+}
+
+static int gesture_pending_read(void)
+{
+    return __atomic_load_n(&gesture_pending, __ATOMIC_ACQUIRE);
+}
+
+static void gesture_pending_set(int value)
+{
+    __atomic_store_n(&gesture_pending, value, __ATOMIC_RELEASE);
+}
+
+static void gesture_delayed_fn(struct work_struct *work)
+{
+    int pending = gesture_pending_xchg(0);
+    gesture_len = 0;
+    if (pending == 1) gesture_event("CONSOLE_FINAL", 1);
+    else if (pending == 2) gesture_event("CHECK_FINAL", 3);
+}
+
+static void gesture_cancel_pending(int expected)
+{
+    if (gesture_pending_cmpxchg(expected, 0) == expected)
+        fn_cancel_delayed_work(&gesture_work);
+}
+
+static void gesture_schedule_pending(int type)
+{
+    gesture_pending_set(type);
+    if (!fn_queue_delayed_work_on(WORK_CPU_UNBOUND, *fn_system_wq,
+                                  &gesture_work, (HZ * 300 + 999) / 1000)) {
+        if (gesture_pending_cmpxchg(type, 0) == type) {
+            gesture_len = 0;
+            gesture_event(type == 1 ? "CONSOLE_FINAL" : "CHECK_FINAL",
+                          type == 1 ? 1 : 3);
+        }
+    }
 }
 
 static void before_input_event(hook_fargs5_t *args, void *udata)
@@ -473,19 +537,44 @@ static void before_input_event(hook_fargs5_t *args, void *udata)
     unsigned int type = (unsigned int)args->arg1;
     unsigned int code = (unsigned int)args->arg2;
     int value = (int)args->arg3;
-    unsigned long long now;
+    unsigned long long now, pending_age = 0;
     unsigned char key;
     static const unsigned char up3[] = { 1, 1, 1 };
     static const unsigned char down3[] = { 2, 2, 2 };
     static const unsigned char check6[] = { 1, 1, 1, 2, 2, 2 };
-    static const unsigned char force7[] = { 1, 1, 1, 2, 2, 2, 1 };
     unsigned int i;
+    int pending;
 
     if (type != EV_KEY || value != 1) return;
     if (code == KEY_VOLUMEUP) key = 1;
     else if (code == KEY_VOLUMEDOWN) key = 2;
     else return;
     now = fn_ktime_get_mono_fast_ns();
+
+    pending = gesture_pending_read();
+    if (pending && gesture_len)
+        pending_age = now - gesture_times[gesture_len - 1];
+    if (pending == 1) {
+        gesture_cancel_pending(1);
+        if (pending_age > 300000000ULL) {
+            gesture_len = 0;
+            gesture_event("CONSOLE_FINAL", 1);
+        }
+    } else if (pending == 2) {
+        if (key == 1 && pending_age <= 300000000ULL &&
+            gesture_pending_cmpxchg(2, 0) == 2) {
+            fn_cancel_delayed_work(&gesture_work);
+            gesture_len = 0;
+            gesture_event("FORCE_FINAL", 4);
+            return;
+        }
+        if (gesture_pending_cmpxchg(2, 0) == 2) {
+            fn_cancel_delayed_work(&gesture_work);
+            gesture_len = 0;
+            gesture_event("CHECK_FINAL", 3);
+        }
+    }
+
     if (gesture_len && now - gesture_times[gesture_len - 1] > 1000000000ULL)
         gesture_len = 0;
     if (gesture_len == 7) {
@@ -499,14 +588,14 @@ static void before_input_event(hook_fargs5_t *args, void *udata)
     gesture_times[gesture_len] = now;
     gesture_len++;
 
-    if (gesture_suffix(up3, 3, 900000000ULL))
-        gesture_event("CONSOLE_UUU", 1);
-    if (gesture_suffix(down3, 3, 900000000ULL))
-        gesture_event("KILL_DDD", 2);
-    if (gesture_suffix(check6, 6, 3000000000ULL))
-        gesture_event("CHECK_UUUDDD", 3);
-    if (gesture_suffix(force7, 7, 3000000000ULL))
-        gesture_event("FORCE_UUUDDDU", 4);
+    if (gesture_suffix(check6, 6, 3000000000ULL)) {
+        gesture_schedule_pending(2);
+    } else if (gesture_suffix(down3, 3, 900000000ULL)) {
+        gesture_len = 0;
+        gesture_event("KILL_FINAL", 2);
+    } else if (gesture_suffix(up3, 3, 900000000ULL)) {
+        gesture_schedule_pending(1);
+    }
 }
 
 static ssize_t control_read(struct file *file, char __user *buf,
@@ -745,7 +834,7 @@ static ssize_t control_write(struct file *file, const char __user *buf,
                       "ERR KPM_OLD" : "ERR CLI_OLD");
         } else {
             hello_tgid = current_id(1);
-            set_reply("OK HELLO 10 3 0.8.8-gesture-observer-test");
+            set_reply("OK HELLO 11 4 0.8.9-gesture-arbitration-test");
         }
         return n;
     }
@@ -1415,6 +1504,12 @@ static long dynalab_init(const char *args, const char *event, void *__user reser
     fn_kernel_read = (void *)kp_lookup_name("kernel_read");
     fn_vfs_fsync = (void *)kp_lookup_name("vfs_fsync");
     fn_ktime_get_mono_fast_ns = (void *)kp_lookup_name("ktime_get_mono_fast_ns");
+    fn_queue_delayed_work_on = (void *)kp_lookup_name("queue_delayed_work_on");
+    fn_cancel_delayed_work = (void *)kp_lookup_name("cancel_delayed_work");
+    fn_cancel_delayed_work_sync = (void *)kp_lookup_name("cancel_delayed_work_sync");
+    fn_init_timer_key = (void *)kp_lookup_name("init_timer_key");
+    fn_delayed_work_timer_fn = (void *)kp_lookup_name("delayed_work_timer_fn");
+    fn_system_wq = (void *)kp_lookup_name("system_wq");
     fn_copy_from_user = (void *)kp_lookup_name("_copy_from_user");
     if (!fn_copy_from_user)
         fn_copy_from_user = (void *)kp_lookup_name("raw_copy_from_user");
@@ -1422,16 +1517,25 @@ static long dynalab_init(const char *args, const char *event, void *__user reser
         !fn_vfree || !fn_copy_from_user || !fn_set_memory_ro ||
         !fn_set_memory_rw || !fn_sha256 || !fn_filp_open || !fn_filp_close ||
         !fn_kernel_write || !fn_kernel_read || !fn_vfs_fsync ||
-        !fn_ktime_get_mono_fast_ns) {
-        dl_log("ERROR: helper missing iov=%d pid=%d vmalloc=%d vfree=%d copy=%d ro=%d rw=%d sha=%d file=%d io=%d sync=%d time=%d\n",
+        !fn_ktime_get_mono_fast_ns || !fn_queue_delayed_work_on ||
+        !fn_cancel_delayed_work || !fn_cancel_delayed_work_sync ||
+        !fn_init_timer_key || !fn_delayed_work_timer_fn || !fn_system_wq) {
+        dl_log("ERROR: helper missing iov=%d pid=%d vmalloc=%d vfree=%d copy=%d ro=%d rw=%d sha=%d file=%d io=%d sync=%d time=%d work=%d\n",
                !!fn_iov_iter_advance, !!fn_task_pid_nr, !!fn_vmalloc,
                !!fn_vfree, !!fn_copy_from_user, !!fn_set_memory_ro,
                !!fn_set_memory_rw, !!fn_sha256,
                !!fn_filp_open && !!fn_filp_close,
                !!fn_kernel_write && !!fn_kernel_read, !!fn_vfs_fsync,
-               !!fn_ktime_get_mono_fast_ns);
+               !!fn_ktime_get_mono_fast_ns,
+               !!fn_queue_delayed_work_on && !!fn_cancel_delayed_work &&
+               !!fn_cancel_delayed_work_sync && !!fn_init_timer_key &&
+               !!fn_delayed_work_timer_fn && !!fn_system_wq);
         return -2;
     }
+    INIT_WORK(&gesture_work.work, gesture_delayed_fn);
+    fn_init_timer_key(&gesture_work.timer, fn_delayed_work_timer_fn,
+                      TIMER_IRQSAFE, NULL, NULL);
+    gesture_pending_set(0);
     detect_efisp_device();
 
     rc = install_one("input_event", 5, before_input_event, &sym_input_event);
@@ -1483,6 +1587,9 @@ fail:
     if (sym_fork) unhook(sym_fork);
     if (sym_input_event) unhook(sym_input_event);
     sym_input_event = NULL;
+    if (fn_cancel_delayed_work_sync)
+        fn_cancel_delayed_work_sync(&gesture_work);
+    gesture_pending_set(0);
     sym_reboot = sym_fallocate = sym_ioctl = sym_write_iter = NULL;
     sym_exit = sym_exec = sym_fork = NULL;
     return rc;
@@ -1578,6 +1685,9 @@ static long dynalab_exit(void *__user reserved)
     if (sym_fork) unhook(sym_fork);
     if (sym_input_event) unhook(sym_input_event);
     sym_input_event = NULL;
+    if (fn_cancel_delayed_work_sync)
+        fn_cancel_delayed_work_sync(&gesture_work);
+    gesture_pending_set(0);
     dl_log("unloaded\n");
     return 0;
 }

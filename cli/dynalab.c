@@ -883,7 +883,7 @@ int main(int argc, char **argv)
     }
 
     use_color = isatty(STDOUT_FILENO) && getenv("NO_COLOR") == NULL;
-    printf("%s%sKPMDynaLab%s %sv0.8.8-gesture-observer-test%s\n",
+    printf("%s%sKPMDynaLab%s %sv0.8.9-gesture-arbitration-test%s\n",
            clr(C_BOLD), clr(C_CYAN), clr(C_RESET), clr(C_DIM), clr(C_RESET));
     printf("%sKernel-assisted dynamic analysis laboratory%s\n\n",
            clr(C_DIM), clr(C_RESET));
@@ -951,7 +951,7 @@ int main(int argc, char **argv)
             send_and_print("SEAL");
         } else if (!strcmp(cmd, "stop")) {
             send_and_print("STOP");
-        } else if (!strcmp(cmd, "events")) {
+        } else if (!strcmp(cmd, "events") || !strcmp(cmd, "event")) {
             show_events();
         } else if (!strcmp(cmd, "blg") && arg) {
             if (!strcmp(arg, "status"))
