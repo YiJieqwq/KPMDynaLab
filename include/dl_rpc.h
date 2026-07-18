@@ -2,9 +2,9 @@
 #ifndef KPM_DYNALAB_RPC_H
 #define KPM_DYNALAB_RPC_H
 
-#define DL_RPC_API_VERSION 11
-#define DL_RPC_MIN_CLI_API 11
-#define DL_EVENT_ABI_VERSION 4
+#define DL_RPC_API_VERSION 12
+#define DL_RPC_MIN_CLI_API 12
+#define DL_EVENT_ABI_VERSION 5
 #define DL_EVENT_MAGIC 0x444c4556u /* DLEV */
 #define DL_EVENT_CAPACITY 256
 #define DL_BLG_MAP_MAX 64
@@ -70,6 +70,8 @@ struct dl_wire_event {
     unsigned int command;
     unsigned int sequence;
     unsigned int parent_pid;
+    unsigned long long monotonic_ns;
+    unsigned long long realtime_ns;
     unsigned int session_id;
     unsigned int scope;
     char name[96];

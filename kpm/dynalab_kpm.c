@@ -66,7 +66,7 @@ extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
 #define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.8.9-gesture-arbitration-test");
+KPM_VERSION("0.8.10-timestamped-events-test");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("YiJieqwq");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
@@ -84,6 +84,7 @@ static void *sym_do_mkdirat;
 static void *sym_notify_change, *sym_vfs_unlink, *sym_vfs_truncate;
 static void *sym_input_event;
 static unsigned long long (*fn_ktime_get_mono_fast_ns)(void);
+static unsigned long long (*fn_ktime_get_real_fast_ns)(void);
 static unsigned char gesture_keys[7];
 static unsigned long long gesture_times[7];
 static unsigned int gesture_len;
@@ -442,6 +443,10 @@ static void add_event_for(unsigned short type, unsigned short action,
     e->command = command;
     e->sequence = seq + 1;
     e->parent_pid = parent_pid;
+    e->monotonic_ns = fn_ktime_get_mono_fast_ns ?
+                      fn_ktime_get_mono_fast_ns() : 0;
+    e->realtime_ns = fn_ktime_get_real_fast_ns ?
+                     fn_ktime_get_real_fast_ns() : 0;
     e->session_id = sid;
     e->scope = scope;
     if (name) {
@@ -834,7 +839,7 @@ static ssize_t control_write(struct file *file, const char __user *buf,
                       "ERR KPM_OLD" : "ERR CLI_OLD");
         } else {
             hello_tgid = current_id(1);
-            set_reply("OK HELLO 11 4 0.8.9-gesture-arbitration-test");
+            set_reply("OK HELLO 12 5 0.8.10-timestamped-events-test");
         }
         return n;
     }
@@ -1504,6 +1509,7 @@ static long dynalab_init(const char *args, const char *event, void *__user reser
     fn_kernel_read = (void *)kp_lookup_name("kernel_read");
     fn_vfs_fsync = (void *)kp_lookup_name("vfs_fsync");
     fn_ktime_get_mono_fast_ns = (void *)kp_lookup_name("ktime_get_mono_fast_ns");
+    fn_ktime_get_real_fast_ns = (void *)kp_lookup_name("ktime_get_real_fast_ns");
     fn_queue_delayed_work_on = (void *)kp_lookup_name("queue_delayed_work_on");
     fn_cancel_delayed_work = (void *)kp_lookup_name("cancel_delayed_work");
     fn_cancel_delayed_work_sync = (void *)kp_lookup_name("cancel_delayed_work_sync");
@@ -1517,7 +1523,8 @@ static long dynalab_init(const char *args, const char *event, void *__user reser
         !fn_vfree || !fn_copy_from_user || !fn_set_memory_ro ||
         !fn_set_memory_rw || !fn_sha256 || !fn_filp_open || !fn_filp_close ||
         !fn_kernel_write || !fn_kernel_read || !fn_vfs_fsync ||
-        !fn_ktime_get_mono_fast_ns || !fn_queue_delayed_work_on ||
+        !fn_ktime_get_mono_fast_ns || !fn_ktime_get_real_fast_ns ||
+        !fn_queue_delayed_work_on ||
         !fn_cancel_delayed_work || !fn_cancel_delayed_work_sync ||
         !fn_init_timer_key || !fn_delayed_work_timer_fn || !fn_system_wq) {
         dl_log("ERROR: helper missing iov=%d pid=%d vmalloc=%d vfree=%d copy=%d ro=%d rw=%d sha=%d file=%d io=%d sync=%d time=%d work=%d\n",
@@ -1526,7 +1533,7 @@ static long dynalab_init(const char *args, const char *event, void *__user reser
                !!fn_set_memory_rw, !!fn_sha256,
                !!fn_filp_open && !!fn_filp_close,
                !!fn_kernel_write && !!fn_kernel_read, !!fn_vfs_fsync,
-               !!fn_ktime_get_mono_fast_ns,
+               !!fn_ktime_get_mono_fast_ns && !!fn_ktime_get_real_fast_ns,
                !!fn_queue_delayed_work_on && !!fn_cancel_delayed_work &&
                !!fn_cancel_delayed_work_sync && !!fn_init_timer_key &&
                !!fn_delayed_work_timer_fn && !!fn_system_wq);

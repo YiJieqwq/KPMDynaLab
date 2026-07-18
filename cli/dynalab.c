@@ -186,6 +186,21 @@ static const char *action_name(unsigned int action)
     }
 }
 
+static void format_event_time(const struct dl_wire_event *e,
+                              char *buf, size_t size)
+{
+    time_t sec = (time_t)(e->realtime_ns / 1000000000ULL);
+    struct tm tm;
+    unsigned long long ms = (e->realtime_ns / 1000000ULL) % 1000ULL;
+    if (!e->realtime_ns || !gmtime_r(&sec, &tm)) {
+        snprintf(buf, size, "time=?");
+        return;
+    }
+    snprintf(buf, size, "%04d-%02d-%02dT%02d:%02d:%02d.%03lluZ",
+             tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+             tm.tm_hour, tm.tm_min, tm.tm_sec, ms);
+}
+
 static int show_events(void)
 {
     int fd = open(EVENTS_PATH, O_RDONLY | O_CLOEXEC);
@@ -199,13 +214,17 @@ static int show_events(void)
         if (e.magic != DL_EVENT_MAGIC || e.version != DL_EVENT_ABI_VERSION)
             continue;
         {
+            char timestamp[48];
             const char *ac = e.action == DL_WIRE_PASS ? C_GREEN :
                              e.action == DL_WIRE_SIMULATE ? C_YELLOW : C_RED;
-            printf("%s#%-5u%s s=%-3u %-16s pid=%-6u ppid=%-6u dev=%u:%u "
+            format_event_time(&e, timestamp, sizeof(timestamp));
+            printf("%s#%-5u%s %s mono=%llu.%03llus s=%-3u %-16s pid=%-6u ppid=%-6u dev=%u:%u "
                    "off=%llu len=%llu cmd=0x%x %s%-8s%s %s\n",
-                   clr(C_DIM), e.sequence, clr(C_RESET), e.session_id,
-                   event_name(e.type), e.pid, e.parent_pid, e.major, e.minor,
-                   e.offset, e.length, e.command, clr(ac),
+                   clr(C_DIM), e.sequence, clr(C_RESET), timestamp,
+                   e.monotonic_ns / 1000000000ULL,
+                   (e.monotonic_ns / 1000000ULL) % 1000ULL,
+                   e.session_id, event_name(e.type), e.pid, e.parent_pid,
+                   e.major, e.minor, e.offset, e.length, e.command, clr(ac),
                    action_name(e.action), clr(C_RESET), e.name);
         }
     }
@@ -883,7 +902,7 @@ int main(int argc, char **argv)
     }
 
     use_color = isatty(STDOUT_FILENO) && getenv("NO_COLOR") == NULL;
-    printf("%s%sKPMDynaLab%s %sv0.8.9-gesture-arbitration-test%s\n",
+    printf("%s%sKPMDynaLab%s %sv0.8.10-timestamped-events-test%s\n",
            clr(C_BOLD), clr(C_CYAN), clr(C_RESET), clr(C_DIM), clr(C_RESET));
     printf("%sKernel-assisted dynamic analysis laboratory%s\n\n",
            clr(C_DIM), clr(C_RESET));
