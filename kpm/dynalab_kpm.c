@@ -8,6 +8,7 @@
 #include <linux/reboot.h>
 #include <linux/kallsyms.h>
 #include <linux/proc_fs.h>
+#include <linux/input.h>
 #include <uapi/linux/fs.h>
 #include "../include/dl_rpc.h"
 
@@ -63,7 +64,7 @@ extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
 #define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.8.7.5-ctl0-error-semantics");
+KPM_VERSION("0.8.8-gesture-observer-test");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("YiJieqwq");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
@@ -79,6 +80,11 @@ static void *sym_vfs_create, *sym_vfs_mkdir, *sym_vfs_write;
 static void *sym_do_filp_open;
 static void *sym_do_mkdirat;
 static void *sym_notify_change, *sym_vfs_unlink, *sym_vfs_truncate;
+static void *sym_input_event;
+static unsigned long long (*fn_ktime_get_mono_fast_ns)(void);
+static unsigned char gesture_keys[7];
+static unsigned long long gesture_times[7];
+static unsigned int gesture_len;
 static void (*fn_iov_iter_advance)(struct iov_iter *i, size_t bytes);
 static unsigned long (*fn_copy_from_user)(void *to, const void __user *from,
                                           unsigned long n);
@@ -444,6 +450,65 @@ static void add_event(unsigned short type, unsigned short action,
                   s ? s->scope : DL_SCOPE_GLOBAL, NULL);
 }
 
+static int gesture_suffix(const unsigned char *pattern, unsigned int n,
+                          unsigned long long window_ns)
+{
+    unsigned int i, start;
+    if (gesture_len < n) return 0;
+    start = gesture_len - n;
+    for (i = 0; i < n; i++)
+        if (gesture_keys[start + i] != pattern[i]) return 0;
+    return gesture_times[gesture_len - 1] - gesture_times[start] <= window_ns;
+}
+
+static void gesture_event(const char *name, unsigned int command)
+{
+    add_event_for(DL_WIRE_GESTURE, DL_WIRE_PASS,
+                  current_id(0), current_id(1), 0, 0, 0, 0, command,
+                  0, DL_SCOPE_GLOBAL, name);
+}
+
+static void before_input_event(hook_fargs5_t *args, void *udata)
+{
+    unsigned int type = (unsigned int)args->arg1;
+    unsigned int code = (unsigned int)args->arg2;
+    int value = (int)args->arg3;
+    unsigned long long now;
+    unsigned char key;
+    static const unsigned char up3[] = { 1, 1, 1 };
+    static const unsigned char down3[] = { 2, 2, 2 };
+    static const unsigned char check6[] = { 1, 1, 1, 2, 2, 2 };
+    static const unsigned char force7[] = { 1, 1, 1, 2, 2, 2, 1 };
+    unsigned int i;
+
+    if (type != EV_KEY || value != 1) return;
+    if (code == KEY_VOLUMEUP) key = 1;
+    else if (code == KEY_VOLUMEDOWN) key = 2;
+    else return;
+    now = fn_ktime_get_mono_fast_ns();
+    if (gesture_len && now - gesture_times[gesture_len - 1] > 1000000000ULL)
+        gesture_len = 0;
+    if (gesture_len == 7) {
+        for (i = 1; i < 7; i++) {
+            gesture_keys[i - 1] = gesture_keys[i];
+            gesture_times[i - 1] = gesture_times[i];
+        }
+        gesture_len = 6;
+    }
+    gesture_keys[gesture_len] = key;
+    gesture_times[gesture_len] = now;
+    gesture_len++;
+
+    if (gesture_suffix(up3, 3, 900000000ULL))
+        gesture_event("CONSOLE_UUU", 1);
+    if (gesture_suffix(down3, 3, 900000000ULL))
+        gesture_event("KILL_DDD", 2);
+    if (gesture_suffix(check6, 6, 3000000000ULL))
+        gesture_event("CHECK_UUUDDD", 3);
+    if (gesture_suffix(force7, 7, 3000000000ULL))
+        gesture_event("FORCE_UUUDDDU", 4);
+}
+
 static ssize_t control_read(struct file *file, char __user *buf,
                             size_t count, loff_t *ppos)
 {
@@ -680,7 +745,7 @@ static ssize_t control_write(struct file *file, const char __user *buf,
                       "ERR KPM_OLD" : "ERR CLI_OLD");
         } else {
             hello_tgid = current_id(1);
-            set_reply("OK HELLO 9 2 0.8.7.5-ctl0-error-semantics");
+            set_reply("OK HELLO 10 3 0.8.8-gesture-observer-test");
         }
         return n;
     }
@@ -1322,6 +1387,7 @@ static long dynalab_init(const char *args, const char *event, void *__user reser
     hello_tgid = -1;
     reply_tgid = -1;
     event_head = 0;
+    gesture_len = 0;
     efisp_dev = 0;
     efisp_guard_armed = 0;
     blg_cache = NULL;
@@ -1348,23 +1414,28 @@ static long dynalab_init(const char *args, const char *event, void *__user reser
     fn_kernel_write = (void *)kp_lookup_name("kernel_write");
     fn_kernel_read = (void *)kp_lookup_name("kernel_read");
     fn_vfs_fsync = (void *)kp_lookup_name("vfs_fsync");
+    fn_ktime_get_mono_fast_ns = (void *)kp_lookup_name("ktime_get_mono_fast_ns");
     fn_copy_from_user = (void *)kp_lookup_name("_copy_from_user");
     if (!fn_copy_from_user)
         fn_copy_from_user = (void *)kp_lookup_name("raw_copy_from_user");
     if (!fn_iov_iter_advance || !fn_task_pid_nr || !fn_vmalloc ||
         !fn_vfree || !fn_copy_from_user || !fn_set_memory_ro ||
         !fn_set_memory_rw || !fn_sha256 || !fn_filp_open || !fn_filp_close ||
-        !fn_kernel_write || !fn_kernel_read || !fn_vfs_fsync) {
-        dl_log("ERROR: helper missing iov=%d pid=%d vmalloc=%d vfree=%d copy=%d ro=%d rw=%d sha=%d file=%d io=%d sync=%d\n",
+        !fn_kernel_write || !fn_kernel_read || !fn_vfs_fsync ||
+        !fn_ktime_get_mono_fast_ns) {
+        dl_log("ERROR: helper missing iov=%d pid=%d vmalloc=%d vfree=%d copy=%d ro=%d rw=%d sha=%d file=%d io=%d sync=%d time=%d\n",
                !!fn_iov_iter_advance, !!fn_task_pid_nr, !!fn_vmalloc,
                !!fn_vfree, !!fn_copy_from_user, !!fn_set_memory_ro,
                !!fn_set_memory_rw, !!fn_sha256,
                !!fn_filp_open && !!fn_filp_close,
-               !!fn_kernel_write && !!fn_kernel_read, !!fn_vfs_fsync);
+               !!fn_kernel_write && !!fn_kernel_read, !!fn_vfs_fsync,
+               !!fn_ktime_get_mono_fast_ns);
         return -2;
     }
     detect_efisp_device();
 
+    rc = install_one("input_event", 5, before_input_event, &sym_input_event);
+    if (rc) goto fail;
     rc = install_one("wake_up_new_task", 1, before_fork, &sym_fork);
     if (rc) goto fail;
     rc = install_one("do_execveat_common", 5, before_exec, &sym_exec);
@@ -1410,6 +1481,8 @@ fail:
     if (sym_exit) unhook(sym_exit);
     if (sym_exec) unhook(sym_exec);
     if (sym_fork) unhook(sym_fork);
+    if (sym_input_event) unhook(sym_input_event);
+    sym_input_event = NULL;
     sym_reboot = sym_fallocate = sym_ioctl = sym_write_iter = NULL;
     sym_exit = sym_exec = sym_fork = NULL;
     return rc;
@@ -1503,6 +1576,8 @@ static long dynalab_exit(void *__user reserved)
     if (sym_exit) unhook(sym_exit);
     if (sym_exec) unhook(sym_exec);
     if (sym_fork) unhook(sym_fork);
+    if (sym_input_event) unhook(sym_input_event);
+    sym_input_event = NULL;
     dl_log("unloaded\n");
     return 0;
 }

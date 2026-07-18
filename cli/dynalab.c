@@ -171,6 +171,7 @@ static const char *event_name(unsigned int type)
     case DL_WIRE_FILE_RENAME: return "FILE_RENAME";
     case DL_WIRE_FILE_UNLINK: return "FILE_UNLINK";
     case DL_WIRE_FILE_TRUNCATE: return "FILE_TRUNCATE";
+    case DL_WIRE_GESTURE: return "GESTURE";
     default: return "UNKNOWN";
     }
 }
@@ -882,7 +883,7 @@ int main(int argc, char **argv)
     }
 
     use_color = isatty(STDOUT_FILENO) && getenv("NO_COLOR") == NULL;
-    printf("%s%sKPMDynaLab%s %sv0.8.7.1-loop-writer-diag%s\n",
+    printf("%s%sKPMDynaLab%s %sv0.8.8-gesture-observer-test%s\n",
            clr(C_BOLD), clr(C_CYAN), clr(C_RESET), clr(C_DIM), clr(C_RESET));
     printf("%sKernel-assisted dynamic analysis laboratory%s\n\n",
            clr(C_DIM), clr(C_RESET));
