@@ -63,7 +63,7 @@ extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
 #define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.8.7.3-loop-injection-fix");
+KPM_VERSION("0.8.7.4-ctl0-syntax-fix");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("YiJieqwq");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
@@ -673,7 +673,7 @@ static ssize_t control_write(struct file *file, const char __user *buf,
                       "ERR KPM_OLD" : "ERR CLI_OLD");
         } else {
             hello_tgid = current_id(1);
-            set_reply("OK HELLO 9 2 0.8.7.3-loop-injection-fix");
+            set_reply("OK HELLO 9 2 0.8.7.4-ctl0-syntax-fix");
         }
         return n;
     }
@@ -1421,8 +1421,10 @@ static long dynalab_ctl0(const char *args, char __user *out_msg, int outlen)
     }
 
     if (prefix(args, "SETUP ")) {
-        if (login_configured) return -1;
-        if (!args[6]) return -22;
+        if (login_configured)
+            return ctl_reply(out_msg, outlen, "ERR ALREADY INITIALIZED");
+        if (!args[6])
+            return ctl_reply(out_msg, outlen, "ERR SYNTAX: SETUP <password>");
         login_verifier = make_verifier(args + 6);
         login_configured = 1;
         authenticated_tgid = -1;
@@ -1432,8 +1434,10 @@ static long dynalab_ctl0(const char *args, char __user *out_msg, int outlen)
     }
 
     if (prefix(args, "SETVER ")) {
-        if (login_configured) return -1;
-        if (parse_hex64(args + 7, &value)) return -22;
+        if (login_configured)
+            return ctl_reply(out_msg, outlen, "ERR ALREADY INITIALIZED");
+        if (parse_hex64(args + 7, &value))
+            return ctl_reply(out_msg, outlen, "ERR SYNTAX: SETVER <16-hex-digits>");
         login_verifier = value;
         login_configured = 1;
         authenticated_tgid = -1;
@@ -1468,7 +1472,8 @@ static long dynalab_ctl0(const char *args, char __user *out_msg, int outlen)
         return ctl_reply(out_msg, outlen, "OK RESET ALL");
     }
 
-    return -22;
+    return ctl_reply(out_msg, outlen,
+        "ERR SYNTAX: STATUS | SETUP <password> | SETVER <hex64> | RESET | RESET ALL");
 }
 
 static long dynalab_exit(void *__user reserved)
