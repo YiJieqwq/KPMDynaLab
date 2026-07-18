@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0-only */
 #include "../include/dl_policy.h"
 
 static int dl_streq(const char *a, const char *b)

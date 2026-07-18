@@ -166,7 +166,7 @@ make
 
 ## License
 
-GPL-2.0 — See [LICENSE](LICENSE)
+GPL-2.0-only — See [LICENSE](LICENSE)
 
 ## Acknowledgments
 

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * include/kpm_dynalab.h — KPMDynaLab 全局定义
  * =============================================
@@ -35,7 +36,7 @@
 /* ---- 元数据 (.kpm.info) ---- */
 #define KPM_NAME        "KPMDynaLab"
 #define KPM_VERSION     "v1.0.0"
-#define KPM_LICENSE     "GPL-2.0"
+#define KPM_LICENSE     "GPL-2.0-only"
 #define KPM_AUTHOR      "YiJieqwq"
 #define KPM_DESC        "Kernel-level Dynamic Analysis Lab for bricker malware"
 

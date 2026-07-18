@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0-only */
 #ifndef KPM_DYNALAB_POLICY_H
 #define KPM_DYNALAB_POLICY_H
 
