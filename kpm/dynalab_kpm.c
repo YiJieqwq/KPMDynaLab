@@ -66,7 +66,7 @@ extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
 #define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.8.12.1-task-comm-fix");
+KPM_VERSION("0.8.13-session-block-test");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("YiJieqwq");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
@@ -846,7 +846,7 @@ static ssize_t control_write(struct file *file, const char __user *buf,
                       "ERR KPM_OLD" : "ERR CLI_OLD");
         } else {
             hello_tgid = current_id(1);
-            set_reply("OK HELLO 13 6 0.8.12.1-task-comm-fix");
+            set_reply("OK HELLO 14 6 0.8.13-session-block-test");
         }
         return n;
     }
@@ -1148,6 +1148,13 @@ static int simulate_dangerous(void)
     return state == DL_SEALED && profile != DL_TRACE;
 }
 
+static int simulate_for_current(dev_t dev)
+{
+    if (efisp_guard_armed && dev == efisp_dev) return 1;
+    if (!simulate_dangerous()) return 0;
+    return find_subject(current_id(0)) != NULL;
+}
+
 static void before_fork(hook_fargs1_t *args, void *udata)
 {
     struct task_struct *child = (struct task_struct *)args->arg0;
@@ -1307,8 +1314,7 @@ static void before_blkdev_write_iter(hook_fargs2_t *args, void *udata)
     if (iocb->ki_filp && iocb->ki_filp->f_mapping &&
         iocb->ki_filp->f_mapping->host)
         dev = iocb->ki_filp->f_mapping->host->i_rdev;
-    simulate = simulate_dangerous() ||
-               (efisp_guard_armed && dev == efisp_dev);
+    simulate = simulate_for_current(dev);
 
     dl_log("BLOCK_WRITE pid=%d dev=%u:%u off=%lld len=%zu profile=%s action=%s\n",
             current_id(0), MAJOR(dev), MINOR(dev), pos, count, profile_name(),
@@ -1340,8 +1346,7 @@ static void before_blkdev_ioctl(hook_fargs3_t *args, void *udata)
     if (!dangerous_ioctl(cmd)) return;
     if (file && file->f_mapping && file->f_mapping->host)
         dev = file->f_mapping->host->i_rdev;
-    simulate = simulate_dangerous() ||
-               (efisp_guard_armed && dev == efisp_dev);
+    simulate = simulate_for_current(dev);
 
     dl_log("BLOCK_IOCTL pid=%d dev=%u:%u cmd=0x%x profile=%s action=%s\n",
             current_id(0), MAJOR(dev), MINOR(dev), cmd, profile_name(),
@@ -1368,8 +1373,7 @@ static void before_blkdev_fallocate(hook_fargs4_t *args, void *udata)
 
     if (file && file->f_mapping && file->f_mapping->host)
         dev = file->f_mapping->host->i_rdev;
-    simulate = simulate_dangerous() ||
-               (efisp_guard_armed && dev == efisp_dev);
+    simulate = simulate_for_current(dev);
 
     dl_log("BLOCK_FALLOCATE pid=%d dev=%u:%u mode=0x%x off=%lld len=%lld profile=%s action=%s\n",
             current_id(0), MAJOR(dev), MINOR(dev), mode, start, len,
