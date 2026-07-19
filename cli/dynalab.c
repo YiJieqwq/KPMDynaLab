@@ -175,6 +175,7 @@ static const char *event_name(unsigned int type)
     case DL_WIRE_KPM_LOAD: return "KPM_LOAD";
     case DL_WIRE_CLI_LOGIN: return "CLI_LOGIN";
     case DL_WIRE_CLI_LOGOUT: return "CLI_LOGOUT";
+    case DL_WIRE_FILE_WRITE_SUMMARY: return "FILE_WRITE_SUM";
     default: return "UNKNOWN";
     }
 }
@@ -312,6 +313,12 @@ static void print_event_record(FILE *out, const struct dl_wire_event *e, int col
                 bold, event_name(e->type), reset, ac, action_name(e->action), reset,
                 e->pid, e->parent_pid, e->session_id, scope_name(e->scope),
                 e->name[0] ? "  name=" : "", e->name[0] ? e->name : "");
+    } else if (e->type == DL_WIRE_FILE_WRITE_SUMMARY) {
+        fprintf(out, "%sFILE_WRITE_SUM%s  %s%s%s  path=%s  off=%llu  total=%llu  "
+                "calls=%u  pid=%u  session=%u\n",
+                bold, reset, ac, action_name(e->action), reset,
+                e->name[0] ? e->name : "?", e->offset, e->length,
+                e->command, e->pid, e->session_id);
     } else if (e->type >= DL_WIRE_FILE_CREATE &&
                e->type <= DL_WIRE_FILE_TRUNCATE) {
         fprintf(out, "%s%s%s  %s%s%s  path=%s  pid=%u  session=%u  "
@@ -1089,7 +1096,7 @@ int main(int argc, char **argv)
     }
 
     use_color = isatty(STDOUT_FILENO) && getenv("NO_COLOR") == NULL;
-    printf("%s%sKPMDynaLab%s %sv0.8.14-file-coverage-test%s\n",
+    printf("%s%sKPMDynaLab%s %sv0.8.14.1-write-summary-test%s\n",
            clr(C_BOLD), clr(C_CYAN), clr(C_RESET), clr(C_DIM), clr(C_RESET));
     printf("%sKernel-assisted dynamic analysis laboratory%s\n\n",
            clr(C_DIM), clr(C_RESET));

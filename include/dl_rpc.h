@@ -2,9 +2,9 @@
 #ifndef KPM_DYNALAB_RPC_H
 #define KPM_DYNALAB_RPC_H
 
-#define DL_RPC_API_VERSION 15
-#define DL_RPC_MIN_CLI_API 15
-#define DL_EVENT_ABI_VERSION 6
+#define DL_RPC_API_VERSION 16
+#define DL_RPC_MIN_CLI_API 16
+#define DL_EVENT_ABI_VERSION 7
 #define DL_EVENT_MAGIC 0x444c4556u /* DLEV */
 #define DL_EVENT_CAPACITY 1024
 #define DL_BLG_MAP_MAX 64
@@ -43,6 +43,7 @@ enum dl_wire_event_type {
     DL_WIRE_KPM_LOAD = 16,
     DL_WIRE_CLI_LOGIN = 17,
     DL_WIRE_CLI_LOGOUT = 18,
+    DL_WIRE_FILE_WRITE_SUMMARY = 19,
 };
 
 enum dl_wire_action {

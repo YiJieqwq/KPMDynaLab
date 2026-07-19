@@ -66,7 +66,7 @@ extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
 #define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.8.14-file-coverage-test");
+KPM_VERSION("0.8.14.1-write-summary-test");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("YiJieqwq");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
@@ -166,6 +166,25 @@ static unsigned int session_counter;
 static unsigned int active_session;
 static dev_t efisp_dev;
 static int efisp_guard_armed;
+
+#define DL_MAX_WRITE_AGG 64
+struct dl_write_agg {
+    int active;
+    int pid;
+    int tgid;
+    int parent_pid;
+    unsigned int session_id;
+    unsigned int scope;
+    struct file *file;
+    unsigned long long first_offset;
+    unsigned long long next_offset;
+    unsigned long long total;
+    unsigned int calls;
+    char name[64];
+};
+static struct dl_write_agg write_aggs[DL_MAX_WRITE_AGG];
+static void clear_write_aggs(void);
+static const char *dentry_leaf(struct dentry *dentry);
 
 
 static int streq(const char *a, const char *b)
@@ -385,6 +404,7 @@ static void clear_subjects(void)
     int i;
     for (i = 0; i < DL_MAX_SUBJECTS; i++)
         subjects[i].active = 0;
+    clear_write_aggs();
     active_session = 0;
 }
 
@@ -476,6 +496,72 @@ static void add_event(unsigned short type, unsigned short action,
                   s ? s->parent_pid : 0, dev, offset, length, command,
                   s ? s->session_id : 0,
                   s ? s->scope : DL_SCOPE_GLOBAL, comm);
+}
+
+static void flush_write_agg_index(unsigned int i)
+{
+    struct dl_write_agg *a = &write_aggs[i];
+    if (!a->active) return;
+    add_event_for(DL_WIRE_FILE_WRITE_SUMMARY, DL_WIRE_PASS,
+                  a->pid, a->tgid, a->parent_pid, 0,
+                  a->first_offset, a->total, a->calls,
+                  a->session_id, a->scope, a->name);
+    a->active = 0;
+}
+
+static void flush_write_agg_pid(int pid)
+{
+    unsigned int i;
+    for (i = 0; i < DL_MAX_WRITE_AGG; i++)
+        if (write_aggs[i].active && write_aggs[i].pid == pid)
+            flush_write_agg_index(i);
+}
+
+static void clear_write_aggs(void)
+{
+    unsigned int i;
+    for (i = 0; i < DL_MAX_WRITE_AGG; i++) write_aggs[i].active = 0;
+}
+
+static void aggregate_file_write(struct dl_subject *s, int pid,
+                                 struct file *file, unsigned long long offset,
+                                 unsigned long long length)
+{
+    unsigned int i, free_i = DL_MAX_WRITE_AGG;
+    const char *name = dentry_leaf(file->f_path.dentry);
+    for (i = 0; i < DL_MAX_WRITE_AGG; i++) {
+        struct dl_write_agg *a = &write_aggs[i];
+        if (!a->active) { if (free_i == DL_MAX_WRITE_AGG) free_i = i; continue; }
+        if (a->pid == pid && a->file == file && a->next_offset == offset) {
+            a->next_offset += length;
+            a->total += length;
+            a->calls++;
+            return;
+        }
+    }
+    flush_write_agg_pid(pid);
+    for (i = 0; i < DL_MAX_WRITE_AGG; i++)
+        if (!write_aggs[i].active) { free_i = i; break; }
+    if (free_i == DL_MAX_WRITE_AGG) {
+        add_event_for(DL_WIRE_FILE_WRITE_SUMMARY, DL_WIRE_PASS,
+                      pid, current_id(1), s->parent_pid, 0,
+                      offset, length, 1, s->session_id, s->scope, name);
+        return;
+    }
+    write_aggs[free_i].active = 1;
+    write_aggs[free_i].pid = pid;
+    write_aggs[free_i].tgid = current_id(1);
+    write_aggs[free_i].parent_pid = s->parent_pid;
+    write_aggs[free_i].session_id = s->session_id;
+    write_aggs[free_i].scope = s->scope;
+    write_aggs[free_i].file = file;
+    write_aggs[free_i].first_offset = offset;
+    write_aggs[free_i].next_offset = offset + length;
+    write_aggs[free_i].total = length;
+    write_aggs[free_i].calls = 1;
+    for (i = 0; i < sizeof(write_aggs[free_i].name) - 1 && name && name[i]; i++)
+        write_aggs[free_i].name[i] = name[i];
+    write_aggs[free_i].name[i] = '\0';
 }
 
 static int gesture_suffix(const unsigned char *pattern, unsigned int n,
@@ -847,7 +933,7 @@ static ssize_t control_write(struct file *file, const char __user *buf,
                       "ERR KPM_OLD" : "ERR CLI_OLD");
         } else {
             hello_tgid = current_id(1);
-            set_reply("OK HELLO 15 6 0.8.14-file-coverage-test");
+            set_reply("OK HELLO 16 7 0.8.14.1-write-summary-test");
         }
         return n;
     }
@@ -1190,6 +1276,7 @@ static void before_exit(hook_fargs1_t *args, void *udata)
     int pid = current_id(0);
     struct dl_subject *s = find_subject(pid);
     if (!s) return;
+    flush_write_agg_pid(pid);
     add_event_for(DL_WIRE_EXIT, DL_WIRE_PASS, pid, current_id(1),
                   s->parent_pid, 0, 0, (unsigned long long)args->arg0,
                   0, s->session_id, s->scope, NULL);
@@ -1259,10 +1346,7 @@ static void before_vfs_write(hook_fargs4_t *args, void *udata)
     if (!s || !file) return;
     inode = file_inode(file);
     if (!inode || !S_ISREG(inode->i_mode)) return;
-    add_event_for(DL_WIRE_FILE_WRITE, DL_WIRE_PASS, pid, current_id(1),
-                  s->parent_pid, 0, pos ? *pos : 0, args->arg2, 0,
-                  s->session_id, s->scope,
-                  dentry_leaf(file->f_path.dentry));
+    aggregate_file_write(s, pid, file, pos ? *pos : 0, args->arg2);
 }
 
 static void before_file_write_iter(hook_fargs2_t *args, void *udata)
@@ -1278,10 +1362,7 @@ static void before_file_write_iter(hook_fargs2_t *args, void *udata)
     if (!file) return;
     inode = file_inode(file);
     if (!inode || !S_ISREG(inode->i_mode)) return;
-    add_event_for(DL_WIRE_FILE_WRITE, DL_WIRE_PASS, pid, current_id(1),
-                  s->parent_pid, 0, iocb->ki_pos, iov_iter_count(from), 1,
-                  s->session_id, s->scope,
-                  dentry_leaf(file->f_path.dentry));
+    aggregate_file_write(s, pid, file, iocb->ki_pos, iov_iter_count(from));
 }
 
 static void before_notify_change(hook_fargs4_t *args, void *udata)
