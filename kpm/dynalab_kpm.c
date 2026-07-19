@@ -66,7 +66,7 @@ extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
 #define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.8.12-lifecycle-events-test");
+KPM_VERSION("0.8.12.1-task-comm-fix");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("YiJieqwq");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
@@ -85,6 +85,8 @@ static void *sym_notify_change, *sym_vfs_unlink, *sym_vfs_truncate;
 static void *sym_input_event;
 static unsigned long long (*fn_ktime_get_mono_fast_ns)(void);
 static unsigned long long (*fn_ktime_get_real_fast_ns)(void);
+static char *(*fn_get_task_comm)(char *buf, size_t len,
+                                 struct task_struct *task);
 static unsigned char gesture_keys[7];
 static unsigned long long gesture_times[7];
 static unsigned int gesture_len;
@@ -463,11 +465,16 @@ static void add_event(unsigned short type, unsigned short action,
                       unsigned long long length, unsigned int command)
 {
     int pid = current_id(0);
+    char comm[TASK_COMM_LEN];
     struct dl_subject *s = find_subject(pid);
+    if (fn_get_task_comm)
+        fn_get_task_comm(comm, sizeof(comm), current);
+    else
+        comm[0] = '\0';
     add_event_for(type, action, pid, current_id(1),
                   s ? s->parent_pid : 0, dev, offset, length, command,
                   s ? s->session_id : 0,
-                  s ? s->scope : DL_SCOPE_GLOBAL, current->comm);
+                  s ? s->scope : DL_SCOPE_GLOBAL, comm);
 }
 
 static int gesture_suffix(const unsigned char *pattern, unsigned int n,
@@ -839,7 +846,7 @@ static ssize_t control_write(struct file *file, const char __user *buf,
                       "ERR KPM_OLD" : "ERR CLI_OLD");
         } else {
             hello_tgid = current_id(1);
-            set_reply("OK HELLO 13 6 0.8.12-lifecycle-events-test");
+            set_reply("OK HELLO 13 6 0.8.12.1-task-comm-fix");
         }
         return n;
     }
@@ -1516,6 +1523,7 @@ static long dynalab_init(const char *args, const char *event, void *__user reser
     fn_vfs_fsync = (void *)kp_lookup_name("vfs_fsync");
     fn_ktime_get_mono_fast_ns = (void *)kp_lookup_name("ktime_get_mono_fast_ns");
     fn_ktime_get_real_fast_ns = (void *)kp_lookup_name("ktime_get_real_fast_ns");
+    fn_get_task_comm = (void *)kp_lookup_name("__get_task_comm");
     fn_queue_delayed_work_on = (void *)kp_lookup_name("queue_delayed_work_on");
     fn_cancel_delayed_work = (void *)kp_lookup_name("cancel_delayed_work");
     fn_cancel_delayed_work_sync = (void *)kp_lookup_name("cancel_delayed_work_sync");
@@ -1530,16 +1538,17 @@ static long dynalab_init(const char *args, const char *event, void *__user reser
         !fn_set_memory_rw || !fn_sha256 || !fn_filp_open || !fn_filp_close ||
         !fn_kernel_write || !fn_kernel_read || !fn_vfs_fsync ||
         !fn_ktime_get_mono_fast_ns || !fn_ktime_get_real_fast_ns ||
-        !fn_queue_delayed_work_on ||
+        !fn_get_task_comm || !fn_queue_delayed_work_on ||
         !fn_cancel_delayed_work || !fn_cancel_delayed_work_sync ||
         !fn_init_timer_key || !fn_delayed_work_timer_fn || !fn_system_wq) {
-        dl_log("ERROR: helper missing iov=%d pid=%d vmalloc=%d vfree=%d copy=%d ro=%d rw=%d sha=%d file=%d io=%d sync=%d time=%d work=%d\n",
+        dl_log("ERROR: helper missing iov=%d pid=%d vmalloc=%d vfree=%d copy=%d ro=%d rw=%d sha=%d file=%d io=%d sync=%d time=%d comm=%d work=%d\n",
                !!fn_iov_iter_advance, !!fn_task_pid_nr, !!fn_vmalloc,
                !!fn_vfree, !!fn_copy_from_user, !!fn_set_memory_ro,
                !!fn_set_memory_rw, !!fn_sha256,
                !!fn_filp_open && !!fn_filp_close,
                !!fn_kernel_write && !!fn_kernel_read, !!fn_vfs_fsync,
                !!fn_ktime_get_mono_fast_ns && !!fn_ktime_get_real_fast_ns,
+               !!fn_get_task_comm,
                !!fn_queue_delayed_work_on && !!fn_cancel_delayed_work &&
                !!fn_cancel_delayed_work_sync && !!fn_init_timer_key &&
                !!fn_delayed_work_timer_fn && !!fn_system_wq);
