@@ -218,13 +218,16 @@ static int show_events(void)
             const char *ac = e.action == DL_WIRE_PASS ? C_GREEN :
                              e.action == DL_WIRE_SIMULATE ? C_YELLOW : C_RED;
             format_event_time(&e, timestamp, sizeof(timestamp));
-            printf("%s#%-5u%s %s mono=%llu.%03llus s=%-3u %-16s pid=%-6u ppid=%-6u dev=%u:%u "
+            printf("%s#%-5u%s  %s%s%s  %smono=+%llu.%03llus%s  "
+                   "s=%-3u %s%-16s%s pid=%-6u ppid=%-6u dev=%u:%u "
                    "off=%llu len=%llu cmd=0x%x %s%-8s%s %s\n",
-                   clr(C_DIM), e.sequence, clr(C_RESET), timestamp,
-                   e.monotonic_ns / 1000000000ULL,
-                   (e.monotonic_ns / 1000000ULL) % 1000ULL,
-                   e.session_id, event_name(e.type), e.pid, e.parent_pid,
-                   e.major, e.minor, e.offset, e.length, e.command, clr(ac),
+                   clr(C_DIM), e.sequence, clr(C_RESET),
+                   clr(C_CYAN), timestamp, clr(C_RESET),
+                   clr(C_DIM), e.monotonic_ns / 1000000000ULL,
+                   (e.monotonic_ns / 1000000ULL) % 1000ULL, clr(C_RESET),
+                   e.session_id, clr(C_BOLD), event_name(e.type), clr(C_RESET),
+                   e.pid, e.parent_pid, e.major, e.minor,
+                   e.offset, e.length, e.command, clr(ac),
                    action_name(e.action), clr(C_RESET), e.name);
         }
     }
@@ -902,7 +905,7 @@ int main(int argc, char **argv)
     }
 
     use_color = isatty(STDOUT_FILENO) && getenv("NO_COLOR") == NULL;
-    printf("%s%sKPMDynaLab%s %sv0.8.10-timestamped-events-test%s\n",
+    printf("%s%sKPMDynaLab%s %sv0.8.10.1-log-format-test%s\n",
            clr(C_BOLD), clr(C_CYAN), clr(C_RESET), clr(C_DIM), clr(C_RESET));
     printf("%sKernel-assisted dynamic analysis laboratory%s\n\n",
            clr(C_DIM), clr(C_RESET));
