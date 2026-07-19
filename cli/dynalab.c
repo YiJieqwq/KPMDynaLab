@@ -222,39 +222,39 @@ static void print_event_record(FILE *out, const struct dl_wire_event *e, int col
         e->action == DL_WIRE_SIMULATE ? C_YELLOW : C_RED;
 
     format_event_time(e, timestamp, sizeof(timestamp));
-    fprintf(out, "%s#%-5u%s  %s%s%s  %smono=+%llu.%03llus%s  ",
+    fprintf(out, "%s#%u%s  %s%s%s  %smono=+%llu.%03llus%s  ",
             dim, e->sequence, reset, cyan, timestamp, reset, dim,
             e->monotonic_ns / 1000000000ULL,
             (e->monotonic_ns / 1000000ULL) % 1000ULL, reset);
 
     if (e->type == DL_WIRE_GESTURE) {
-        fprintf(out, "%sGESTURE%s  result=%s%s%s  %s%-8s%s  cmd=0x%x  scope=global\n",
+        fprintf(out, "%sGESTURE%s  result=%s%s%s  %s%s%s  cmd=0x%x  scope=global\n",
                 bold, reset, bold, e->name[0] ? e->name : "UNKNOWN", reset,
                 ac, action_name(e->action), reset, e->command);
     } else if (e->type == DL_WIRE_BLOCK_WRITE ||
                e->type == DL_WIRE_BLOCK_IOCTL ||
                e->type == DL_WIRE_BLOCK_FALLOCATE) {
-        fprintf(out, "%s%-16s%s  %s%-8s%s  dev=%u:%u  off=%llu  len=%llu  "
+        fprintf(out, "%s%s%s  %s%s%s  dev=%u:%u  off=%llu  len=%llu  "
                 "pid=%u  session=%u  cmd=0x%x\n",
                 bold, event_name(e->type), reset, ac, action_name(e->action), reset,
                 e->major, e->minor, e->offset, e->length,
                 e->pid, e->session_id, e->command);
     } else if (e->type == DL_WIRE_FORK || e->type == DL_WIRE_EXEC ||
                e->type == DL_WIRE_EXIT) {
-        fprintf(out, "%s%-16s%s  %s%-8s%s  pid=%u  ppid=%u  session=%u  "
+        fprintf(out, "%s%s%s  %s%s%s  pid=%u  ppid=%u  session=%u  "
                 "scope=%s%s%s\n",
                 bold, event_name(e->type), reset, ac, action_name(e->action), reset,
                 e->pid, e->parent_pid, e->session_id, scope_name(e->scope),
                 e->name[0] ? "  name=" : "", e->name[0] ? e->name : "");
     } else if (e->type >= DL_WIRE_FILE_CREATE &&
                e->type <= DL_WIRE_FILE_TRUNCATE) {
-        fprintf(out, "%s%-16s%s  %s%-8s%s  path=%s  pid=%u  session=%u  "
+        fprintf(out, "%s%s%s  %s%s%s  path=%s  pid=%u  session=%u  "
                 "off=%llu  len=%llu\n",
                 bold, event_name(e->type), reset, ac, action_name(e->action), reset,
                 e->name[0] ? e->name : "?", e->pid, e->session_id,
                 e->offset, e->length);
     } else {
-        fprintf(out, "%s%-16s%s  %s%-8s%s  pid=%u  ppid=%u  session=%u  "
+        fprintf(out, "%s%s%s  %s%s%s  pid=%u  ppid=%u  session=%u  "
                 "dev=%u:%u  off=%llu  len=%llu  cmd=0x%x%s%s\n",
                 bold, event_name(e->type), reset, ac, action_name(e->action), reset,
                 e->pid, e->parent_pid, e->session_id, e->major, e->minor,
@@ -1000,7 +1000,7 @@ int main(int argc, char **argv)
     }
 
     use_color = isatty(STDOUT_FILENO) && getenv("NO_COLOR") == NULL;
-    printf("%s%sKPMDynaLab%s %sv0.8.10.2-log-export-test%s\n",
+    printf("%s%sKPMDynaLab%s %sv0.8.10.3-compact-log-test%s\n",
            clr(C_BOLD), clr(C_CYAN), clr(C_RESET), clr(C_DIM), clr(C_RESET));
     printf("%sKernel-assisted dynamic analysis laboratory%s\n\n",
            clr(C_DIM), clr(C_RESET));
