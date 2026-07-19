@@ -2,9 +2,9 @@
 #ifndef KPM_DYNALAB_RPC_H
 #define KPM_DYNALAB_RPC_H
 
-#define DL_RPC_API_VERSION 18
-#define DL_RPC_MIN_CLI_API 18
-#define DL_EVENT_ABI_VERSION 7
+#define DL_RPC_API_VERSION 19
+#define DL_RPC_MIN_CLI_API 19
+#define DL_EVENT_ABI_VERSION 8
 #define DL_EVENT_MAGIC 0x444c4556u /* DLEV */
 #define DL_EVENT_CAPACITY 1024
 #define DL_BLG_MAP_MAX 64
@@ -50,6 +50,7 @@ enum dl_wire_action {
     DL_WIRE_PASS = 0,
     DL_WIRE_SIMULATE = 1,
     DL_WIRE_SUPPRESS = 2,
+    DL_WIRE_ERROR = 3,
 };
 
 enum dl_wire_scope {

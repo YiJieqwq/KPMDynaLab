@@ -187,6 +187,7 @@ static const char *action_name(unsigned int action)
     case DL_WIRE_PASS: return "PASS";
     case DL_WIRE_SIMULATE: return "SIMULATE";
     case DL_WIRE_SUPPRESS: return "SUPPRESS";
+    case DL_WIRE_ERROR: return "ERROR";
     default: return "UNKNOWN";
     }
 }
@@ -307,8 +308,15 @@ static void print_event_record(FILE *out, const struct dl_wire_event *e, int col
                 e->major, e->minor, device_label(e->major, e->minor),
                 e->offset, e->length, e->pid,
                 e->name[0] ? e->name : "?", e->session_id, e->command);
-    } else if (e->type == DL_WIRE_FORK || e->type == DL_WIRE_EXEC ||
-               e->type == DL_WIRE_EXIT) {
+    } else if (e->type == DL_WIRE_EXIT) {
+        unsigned long long signal_no = e->length & 0x7fULL;
+        unsigned long long exit_code = (e->length >> 8) & 0xffULL;
+        fprintf(out, "%sEXIT%s  %s%s%s  pid=%u  ppid=%u  session=%u  scope=%s  ",
+                bold, reset, ac, action_name(e->action), reset,
+                e->pid, e->parent_pid, e->session_id, scope_name(e->scope));
+        if (signal_no) fprintf(out, "signal=%llu\n", signal_no);
+        else fprintf(out, "code=%llu\n", exit_code);
+    } else if (e->type == DL_WIRE_FORK || e->type == DL_WIRE_EXEC) {
         fprintf(out, "%s%s%s  %s%s%s  pid=%u  ppid=%u  session=%u  "
                 "scope=%s%s%s\n",
                 bold, event_name(e->type), reset, ac, action_name(e->action), reset,
@@ -343,6 +351,7 @@ struct dl_event_stats {
     unsigned long long pass;
     unsigned long long simulate;
     unsigned long long suppress;
+    unsigned long long error;
     unsigned long long unknown;
 };
 
@@ -373,6 +382,7 @@ static int stream_events(FILE *out, int color, unsigned int *exported,
             if (e.action == DL_WIRE_PASS) stats->pass += weight;
             else if (e.action == DL_WIRE_SIMULATE) stats->simulate += weight;
             else if (e.action == DL_WIRE_SUPPRESS) stats->suppress += weight;
+            else if (e.action == DL_WIRE_ERROR) stats->error += weight;
             else stats->unknown += weight;
         }
     }
@@ -392,11 +402,13 @@ static int show_events_since(unsigned int sequence)
     int rc = stream_events(stdout, use_color, NULL, sequence, &stats);
     if (!rc) {
         printf("%sSummary%s  operations=%llu  records=%u  "
-               "%sPASS=%llu%s  %sSIMULATE=%llu%s  %sSUPPRESS=%llu%s",
+               "%sPASS=%llu%s  %sSIMULATE=%llu%s  %sSUPPRESS=%llu%s  "
+               "%sERROR=%llu%s",
                clr(C_BOLD), clr(C_RESET), stats.operations, stats.records,
                clr(C_GREEN), stats.pass, clr(C_RESET),
                clr(C_YELLOW), stats.simulate, clr(C_RESET),
-               clr(C_RED), stats.suppress, clr(C_RESET));
+               clr(C_RED), stats.suppress, clr(C_RESET),
+               clr(C_RED), stats.error, clr(C_RESET));
         if (stats.unknown)
             printf("  UNKNOWN=%llu", stats.unknown);
         putchar('\n');
@@ -1118,6 +1130,19 @@ static int send_and_print(const char *cmd)
     return !strncmp(reply, "ERR", 3);
 }
 
+static int require_unsealed(const char *operation)
+{
+    char reply[256];
+    if (!rpc("STATUS", reply, sizeof(reply)) && !strncmp(reply, "SEALED", 6)) {
+        fprintf(stderr, "%sOperation not permitted%s: %s is disabled while SEALED.\n",
+                clr(C_RED), clr(C_RESET), operation);
+        fprintf(stderr, "%sHint%s: run 'unseal' first.\n",
+                clr(C_YELLOW), clr(C_RESET));
+        return 0;
+    }
+    return 1;
+}
+
 static int login(void)
 {
     char password[256];
@@ -1166,7 +1191,7 @@ int main(int argc, char **argv)
     }
 
     use_color = isatty(STDOUT_FILENO) && getenv("NO_COLOR") == NULL;
-    printf("%s%sKPMDynaLab%s %sv0.8.16-run-summary-test%s\n",
+    printf("%s%sKPMDynaLab%s %sv0.8.17-error-input-test%s\n",
            clr(C_BOLD), clr(C_CYAN), clr(C_RESET), clr(C_DIM), clr(C_RESET));
     printf("%sKernel-assisted dynamic analysis laboratory%s\n\n",
            clr(C_DIM), clr(C_RESET));
@@ -1238,8 +1263,10 @@ int main(int argc, char **argv)
         } else if (!strcmp(cmd, "events") || !strcmp(cmd, "event")) {
             if (!arg)
                 show_events();
-            else if (!strcmp(arg, "clear"))
-                send_and_print("CLEAR");
+            else if (!strcmp(arg, "clear")) {
+                if (require_unsealed("events clear"))
+                    send_and_print("CLEAR");
+            }
             else if (!strcmp(arg, "export"))
                 export_events();
             else
@@ -1260,8 +1287,10 @@ int main(int argc, char **argv)
                 blg_verify_all();
             else if (!strcmp(arg, "selftest"))
                 blg_selftest();
-            else if (!strcmp(arg, "unload") || !strcmp(arg, "release"))
-                send_and_print("BLG CACHE DROP");
+            else if (!strcmp(arg, "unload") || !strcmp(arg, "release")) {
+                if (require_unsealed("blg unload"))
+                    send_and_print("BLG CACHE DROP");
+            }
             else if (!strcmp(arg, "advanced"))
                 puts("Advanced: blg pack create/verify | blg cache load/status/verify/drop | blg map status/verify/drop");
             else if (!strcmp(arg, "pack create"))
@@ -1350,6 +1379,8 @@ int main(int argc, char **argv)
             if (write(gate[1], "G", 1) != 1)
                 perror("release target");
             close(gate[1]);
+            if (isatty(STDIN_FILENO))
+                puts("Target running; interactive stdin/stdout/stderr attached.");
 
             waitpid(pid, &status, 0);
             if (WIFEXITED(status))

@@ -66,7 +66,7 @@ extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
 #define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.8.16-run-summary-test");
+KPM_VERSION("0.8.17-error-input-test");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("YiJieqwq");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
@@ -937,7 +937,7 @@ static ssize_t control_write(struct file *file, const char __user *buf,
                       "ERR KPM_OLD" : "ERR CLI_OLD");
         } else {
             hello_tgid = current_id(1);
-            set_reply("OK HELLO 18 7 0.8.16-run-summary-test");
+            set_reply("OK HELLO 19 8 0.8.17-error-input-test");
         }
         return n;
     }
@@ -1298,7 +1298,9 @@ static void before_exit(hook_fargs1_t *args, void *udata)
     struct dl_subject *s = find_subject(pid);
     if (!s) return;
     flush_write_agg_pid(pid);
-    add_event_for(DL_WIRE_EXIT, DL_WIRE_PASS, pid, current_id(1),
+    add_event_for(DL_WIRE_EXIT,
+                  args->arg0 ? DL_WIRE_ERROR : DL_WIRE_PASS,
+                  pid, current_id(1),
                   s->parent_pid, 0, 0, (unsigned long long)args->arg0,
                   0, s->session_id, s->scope, NULL);
     s->active = 0;
