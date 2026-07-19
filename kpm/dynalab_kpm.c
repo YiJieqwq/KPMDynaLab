@@ -66,7 +66,7 @@ extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
 #define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.8.14.2-internal-io-filter");
+KPM_VERSION("0.8.15-command-semantics");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("YiJieqwq");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
@@ -936,7 +936,7 @@ static ssize_t control_write(struct file *file, const char __user *buf,
                       "ERR KPM_OLD" : "ERR CLI_OLD");
         } else {
             hello_tgid = current_id(1);
-            set_reply("OK HELLO 16 7 0.8.14.2-internal-io-filter");
+            set_reply("OK HELLO 17 7 0.8.15-command-semantics");
         }
         return n;
     }
@@ -1138,11 +1138,11 @@ static ssize_t control_write(struct file *file, const char __user *buf,
         if (state == DL_READY) state = DL_CONFIGURED;
         state = DL_SEALED;
         set_reply("OK SEALED");
-    } else if (streq(cmd, "STOP")) {
+    } else if (streq(cmd, "UNSEAL") || streq(cmd, "STOP")) {
         state = DL_READY;
         profile = DL_AUTO;
         clear_subjects();
-        set_reply("OK STOP");
+        set_reply("OK UNSEALED");
     } else if (streq(cmd, "CLEAR")) {
         if (state == DL_SEALED) {
             set_reply("ERR SEALED");

@@ -1013,27 +1013,38 @@ static void blg_first_run_prompt(void)
     }
 }
 
+static void clear_screen(void)
+{
+    if (isatty(STDOUT_FILENO)) {
+        fputs("\033[2J\033[H", stdout);
+        fflush(stdout);
+    } else {
+        putchar('\n');
+    }
+}
+
 static void help(void)
 {
     puts("Commands:");
     puts("  status                 show KPM state");
-    puts("  active                 show active target/descendant count");
-    puts("  profile auto|trace|expert");
-    puts("  seal                   activate selected profile");
-    puts("  stop                   authenticated stop/reset");
+    puts("  session active         show active target/descendant count");
+    puts("  mode auto|trace|expert select containment mode");
+    puts("  seal                   activate selected containment mode");
+    puts("  unseal                 end containment and return to READY");
     puts("  events | event         show recorded events");
-    puts("  export                 export events to /data/adb/dynalab/logs");
+    puts("  events clear           clear event ring (not while SEALED)");
+    puts("  events export          export events to /data/adb/dynalab/logs");
+    puts("  clear                  clear terminal screen only");
     puts("  blg status             show BLG state");
     puts("  blg setup              rebuild pack and prepare BLG");
     puts("  blg prepare            load/validate BLG if needed");
     puts("  blg verify             verify pack, RAM cache and image map");
     puts("  blg selftest           run loop-backed write/repair verification");
-    puts("  blg release            release BLG RAM cache before SEALED");
+    puts("  blg unload             unload BLG RAM cache before SEALED");
     puts("  blg advanced           show low-level BLG commands");
-    puts("  clear                  clear event ring (not while SEALED)");
     puts("  run <program> [args]   seal and execute target");
     puts("  help");
-    puts("  exit");
+    puts("  exit | quit");
 }
 
 static int send_and_print(const char *cmd)
@@ -1096,7 +1107,7 @@ int main(int argc, char **argv)
     }
 
     use_color = isatty(STDOUT_FILENO) && getenv("NO_COLOR") == NULL;
-    printf("%s%sKPMDynaLab%s %sv0.8.14.1-write-summary-test%s\n",
+    printf("%s%sKPMDynaLab%s %sv0.8.15-command-semantics%s\n",
            clr(C_BOLD), clr(C_CYAN), clr(C_RESET), clr(C_DIM), clr(C_RESET));
     printf("%sKernel-assisted dynamic analysis laboratory%s\n\n",
            clr(C_DIM), clr(C_RESET));
@@ -1138,11 +1149,11 @@ int main(int argc, char **argv)
             if (!rpc("STATUS", reply, sizeof(reply)) &&
                 !strncmp(reply, "SEALED", 6)) {
                 char answer[16];
-                printf("Session is SEALED. Stop it before exiting? [Y/n] ");
+                printf("Session is SEALED. Unseal before exiting? [Y/n] ");
                 fflush(stdout);
                 if (!fgets(answer, sizeof(answer), stdin) ||
                     answer[0] == '\n' || answer[0] == 'y' || answer[0] == 'Y') {
-                    if (send_and_print("STOP"))
+                    if (send_and_print("UNSEAL"))
                         continue;
                 } else {
                     puts("Leaving protection SEALED; Manager RESET may be required.");
@@ -1154,20 +1165,30 @@ int main(int argc, char **argv)
             help();
         } else if (!strcmp(cmd, "status")) {
             send_and_print("STATUS");
-        } else if (!strcmp(cmd, "active")) {
+        } else if ((!strcmp(cmd, "session") && arg && !strcmp(arg, "active")) ||
+                   !strcmp(cmd, "active")) {
             send_and_print("ACTIVE");
-        } else if (!strcmp(cmd, "profile") && arg) {
+        } else if ((!strcmp(cmd, "mode") || !strcmp(cmd, "profile")) && arg) {
             char rpc_cmd[64];
             snprintf(rpc_cmd, sizeof(rpc_cmd), "PROFILE %s", arg);
             send_and_print(rpc_cmd);
         } else if (!strcmp(cmd, "seal")) {
             send_and_print("SEAL");
-        } else if (!strcmp(cmd, "stop")) {
-            send_and_print("STOP");
+        } else if (!strcmp(cmd, "unseal") || !strcmp(cmd, "stop")) {
+            send_and_print("UNSEAL");
         } else if (!strcmp(cmd, "events") || !strcmp(cmd, "event")) {
-            show_events();
+            if (!arg)
+                show_events();
+            else if (!strcmp(arg, "clear"))
+                send_and_print("CLEAR");
+            else if (!strcmp(arg, "export"))
+                export_events();
+            else
+                puts("Usage: events [clear|export]");
         } else if (!strcmp(cmd, "export")) {
             export_events();
+        } else if (!strcmp(cmd, "clear")) {
+            clear_screen();
         } else if (!strcmp(cmd, "blg") && arg) {
             if (!strcmp(arg, "status"))
                 blg_pack_status();
@@ -1180,7 +1201,7 @@ int main(int argc, char **argv)
                 blg_verify_all();
             else if (!strcmp(arg, "selftest"))
                 blg_selftest();
-            else if (!strcmp(arg, "release"))
+            else if (!strcmp(arg, "unload") || !strcmp(arg, "release"))
                 send_and_print("BLG CACHE DROP");
             else if (!strcmp(arg, "advanced"))
                 puts("Advanced: blg pack create/verify | blg cache load/status/verify/drop | blg map status/verify/drop");
@@ -1203,9 +1224,7 @@ int main(int argc, char **argv)
             else if (!strcmp(arg, "map drop"))
                 send_and_print("BLG MAP DROP");
             else
-                puts("Usage: blg status | setup | prepare | verify | release | advanced");
-        } else if (!strcmp(cmd, "clear")) {
-            send_and_print("CLEAR");
+                puts("Usage: blg status | setup | prepare | verify | selftest | unload | advanced");
         } else if (!strcmp(cmd, "run") && arg) {
             pid_t pid;
             char *run_argv[64];
