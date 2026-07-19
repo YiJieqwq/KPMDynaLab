@@ -66,7 +66,7 @@ extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
 #define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.8.14.1-write-summary-test");
+KPM_VERSION("0.8.14.2-internal-io-filter");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("YiJieqwq");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
@@ -166,6 +166,7 @@ static unsigned int session_counter;
 static unsigned int active_session;
 static dev_t efisp_dev;
 static int efisp_guard_armed;
+static int blg_internal_io_pid = -1;
 
 #define DL_MAX_WRITE_AGG 64
 struct dl_write_agg {
@@ -813,6 +814,7 @@ static int blg_loop_selftest(const char *path, int inject)
     }
     verify = fn_vmalloc(1024 * 1024);
     if (!verify) { rc = -12; goto out; }
+    blg_internal_io_pid = current_id(0);
 
     for (i = 0; i < blg_map_count; i++) {
         unsigned long long left = blg_map[i].image_size;
@@ -897,6 +899,7 @@ static int blg_loop_selftest(const char *path, int inject)
     }
     rc = repaired ? 1 : 0;
 out:
+    blg_internal_io_pid = -1;
     if (verify) fn_vfree(verify);
     fn_filp_close(file, NULL);
     return rc;
@@ -933,7 +936,7 @@ static ssize_t control_write(struct file *file, const char __user *buf,
                       "ERR KPM_OLD" : "ERR CLI_OLD");
         } else {
             hello_tgid = current_id(1);
-            set_reply("OK HELLO 16 7 0.8.14.1-write-summary-test");
+            set_reply("OK HELLO 16 7 0.8.14.2-internal-io-filter");
         }
         return n;
     }
@@ -1409,6 +1412,7 @@ static void before_blkdev_write_iter(hook_fargs2_t *args, void *udata)
     dev_t dev = 0;
 
     int simulate;
+    if (blg_internal_io_pid == current_id(0)) return;
     if (!iocb || !from) return;
     count = iov_iter_count(from);
     pos = iocb->ki_pos;
@@ -1444,6 +1448,7 @@ static void before_blkdev_ioctl(hook_fargs3_t *args, void *udata)
     dev_t dev = 0;
     int simulate;
 
+    if (blg_internal_io_pid == current_id(0)) return;
     if (!dangerous_ioctl(cmd)) return;
     if (file && file->f_mapping && file->f_mapping->host)
         dev = file->f_mapping->host->i_rdev;
@@ -1472,6 +1477,7 @@ static void before_blkdev_fallocate(hook_fargs4_t *args, void *udata)
     dev_t dev = 0;
     int simulate;
 
+    if (blg_internal_io_pid == current_id(0)) return;
     if (file && file->f_mapping && file->f_mapping->host)
         dev = file->f_mapping->host->i_rdev;
     simulate = simulate_for_current(dev);
@@ -1614,6 +1620,7 @@ static long dynalab_init(const char *args, const char *event, void *__user reser
     hello_tgid = -1;
     reply_tgid = -1;
     event_head = 0;
+    blg_internal_io_pid = -1;
     gesture_len = 0;
     efisp_dev = 0;
     efisp_guard_armed = 0;
