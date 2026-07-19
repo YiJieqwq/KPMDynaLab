@@ -11,8 +11,8 @@ Current test values:
 ```text
 RPC API:   12
 Event ABI: 5
-KPM:       0.8.10-timestamped-events-test
-CLI:       0.8.10-timestamped-events-test
+KPM:       0.8.11-event-context-test
+CLI:       0.8.11-event-context-test
 ```
 
 Before STATUS or LOGIN, CLI sends:

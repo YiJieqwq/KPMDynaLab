@@ -66,7 +66,7 @@ extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
 #define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.8.10-timestamped-events-test");
+KPM_VERSION("0.8.11-event-context-test");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("YiJieqwq");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
@@ -467,7 +467,7 @@ static void add_event(unsigned short type, unsigned short action,
     add_event_for(type, action, pid, current_id(1),
                   s ? s->parent_pid : 0, dev, offset, length, command,
                   s ? s->session_id : 0,
-                  s ? s->scope : DL_SCOPE_GLOBAL, NULL);
+                  s ? s->scope : DL_SCOPE_GLOBAL, current->comm);
 }
 
 static int gesture_suffix(const unsigned char *pattern, unsigned int n,
@@ -839,7 +839,7 @@ static ssize_t control_write(struct file *file, const char __user *buf,
                       "ERR KPM_OLD" : "ERR CLI_OLD");
         } else {
             hello_tgid = current_id(1);
-            set_reply("OK HELLO 12 5 0.8.10-timestamped-events-test");
+            set_reply("OK HELLO 12 5 0.8.11-event-context-test");
         }
         return n;
     }

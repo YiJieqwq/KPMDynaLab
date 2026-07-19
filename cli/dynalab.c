@@ -210,6 +210,61 @@ static const char *scope_name(unsigned int scope)
     }
 }
 
+struct dl_dev_label {
+    unsigned int major, minor;
+    char label[64];
+};
+
+static const char *device_label(unsigned int major_no, unsigned int minor_no)
+{
+    static struct dl_dev_label cache[64];
+    static unsigned int used;
+    char path[160], buf[4096], *p, *end;
+    ssize_t n;
+    int fd;
+    unsigned int i;
+
+    if (!major_no && !minor_no) return "-";
+    for (i = 0; i < used; i++)
+        if (cache[i].major == major_no && cache[i].minor == minor_no)
+            return cache[i].label;
+    if (used >= 64) return "?";
+    cache[used].major = major_no;
+    cache[used].minor = minor_no;
+    snprintf(cache[used].label, sizeof(cache[used].label), "?");
+
+    snprintf(path, sizeof(path), "/sys/dev/block/%u:%u/dm/name", major_no, minor_no);
+    fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd >= 0) {
+        n = read(fd, cache[used].label, sizeof(cache[used].label) - 1);
+        close(fd);
+        if (n > 0) {
+            cache[used].label[n] = '\0';
+            cache[used].label[strcspn(cache[used].label, "\r\n")] = '\0';
+            return cache[used++].label;
+        }
+    }
+
+    snprintf(path, sizeof(path), "/sys/dev/block/%u:%u/uevent", major_no, minor_no);
+    fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd >= 0) {
+        n = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+        if (n > 0) {
+            buf[n] = '\0';
+            p = strstr(buf, "PARTNAME=");
+            if (!p) p = strstr(buf, "DEVNAME=");
+            if (p) {
+                p = strchr(p, '=') + 1;
+                end = strpbrk(p, "\r\n");
+                if (end) *end = '\0';
+                snprintf(cache[used].label, sizeof(cache[used].label), "%.63s", p);
+            }
+        }
+    }
+    return cache[used++].label;
+}
+
 static void print_event_record(FILE *out, const struct dl_wire_event *e, int color)
 {
     char timestamp[48];
@@ -234,11 +289,12 @@ static void print_event_record(FILE *out, const struct dl_wire_event *e, int col
     } else if (e->type == DL_WIRE_BLOCK_WRITE ||
                e->type == DL_WIRE_BLOCK_IOCTL ||
                e->type == DL_WIRE_BLOCK_FALLOCATE) {
-        fprintf(out, "%s%s%s  %s%s%s  dev=%u:%u  off=%llu  len=%llu  "
-                "pid=%u  session=%u  cmd=0x%x\n",
+        fprintf(out, "%s%s%s  %s%s%s  dev=%u:%u(%s)  off=%llu  len=%llu  "
+                "pid=%u  proc=%s  session=%u  cmd=0x%x\n",
                 bold, event_name(e->type), reset, ac, action_name(e->action), reset,
-                e->major, e->minor, e->offset, e->length,
-                e->pid, e->session_id, e->command);
+                e->major, e->minor, device_label(e->major, e->minor),
+                e->offset, e->length, e->pid,
+                e->name[0] ? e->name : "?", e->session_id, e->command);
     } else if (e->type == DL_WIRE_FORK || e->type == DL_WIRE_EXEC ||
                e->type == DL_WIRE_EXIT) {
         fprintf(out, "%s%s%s  %s%s%s  pid=%u  ppid=%u  session=%u  "
@@ -1000,7 +1056,7 @@ int main(int argc, char **argv)
     }
 
     use_color = isatty(STDOUT_FILENO) && getenv("NO_COLOR") == NULL;
-    printf("%s%sKPMDynaLab%s %sv0.8.10.3-compact-log-test%s\n",
+    printf("%s%sKPMDynaLab%s %sv0.8.11-event-context-test%s\n",
            clr(C_BOLD), clr(C_CYAN), clr(C_RESET), clr(C_DIM), clr(C_RESET));
     printf("%sKernel-assisted dynamic analysis laboratory%s\n\n",
            clr(C_DIM), clr(C_RESET));
