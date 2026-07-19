@@ -201,11 +201,74 @@ static void format_event_time(const struct dl_wire_event *e,
              tm.tm_hour, tm.tm_min, tm.tm_sec, ms);
 }
 
-static int show_events(void)
+static const char *scope_name(unsigned int scope)
+{
+    switch (scope) {
+    case DL_SCOPE_TARGET: return "target";
+    case DL_SCOPE_DESCENDANT: return "descendant";
+    default: return "global";
+    }
+}
+
+static void print_event_record(FILE *out, const struct dl_wire_event *e, int color)
+{
+    char timestamp[48];
+    const char *dim = color ? C_DIM : "";
+    const char *cyan = color ? C_CYAN : "";
+    const char *bold = color ? C_BOLD : "";
+    const char *reset = color ? C_RESET : "";
+    const char *ac = !color ? "" :
+        e->action == DL_WIRE_PASS ? C_GREEN :
+        e->action == DL_WIRE_SIMULATE ? C_YELLOW : C_RED;
+
+    format_event_time(e, timestamp, sizeof(timestamp));
+    fprintf(out, "%s#%-5u%s  %s%s%s  %smono=+%llu.%03llus%s  ",
+            dim, e->sequence, reset, cyan, timestamp, reset, dim,
+            e->monotonic_ns / 1000000000ULL,
+            (e->monotonic_ns / 1000000ULL) % 1000ULL, reset);
+
+    if (e->type == DL_WIRE_GESTURE) {
+        fprintf(out, "%sGESTURE%s  result=%s%s%s  %s%-8s%s  cmd=0x%x  scope=global\n",
+                bold, reset, bold, e->name[0] ? e->name : "UNKNOWN", reset,
+                ac, action_name(e->action), reset, e->command);
+    } else if (e->type == DL_WIRE_BLOCK_WRITE ||
+               e->type == DL_WIRE_BLOCK_IOCTL ||
+               e->type == DL_WIRE_BLOCK_FALLOCATE) {
+        fprintf(out, "%s%-16s%s  %s%-8s%s  dev=%u:%u  off=%llu  len=%llu  "
+                "pid=%u  session=%u  cmd=0x%x\n",
+                bold, event_name(e->type), reset, ac, action_name(e->action), reset,
+                e->major, e->minor, e->offset, e->length,
+                e->pid, e->session_id, e->command);
+    } else if (e->type == DL_WIRE_FORK || e->type == DL_WIRE_EXEC ||
+               e->type == DL_WIRE_EXIT) {
+        fprintf(out, "%s%-16s%s  %s%-8s%s  pid=%u  ppid=%u  session=%u  "
+                "scope=%s%s%s\n",
+                bold, event_name(e->type), reset, ac, action_name(e->action), reset,
+                e->pid, e->parent_pid, e->session_id, scope_name(e->scope),
+                e->name[0] ? "  name=" : "", e->name[0] ? e->name : "");
+    } else if (e->type >= DL_WIRE_FILE_CREATE &&
+               e->type <= DL_WIRE_FILE_TRUNCATE) {
+        fprintf(out, "%s%-16s%s  %s%-8s%s  path=%s  pid=%u  session=%u  "
+                "off=%llu  len=%llu\n",
+                bold, event_name(e->type), reset, ac, action_name(e->action), reset,
+                e->name[0] ? e->name : "?", e->pid, e->session_id,
+                e->offset, e->length);
+    } else {
+        fprintf(out, "%s%-16s%s  %s%-8s%s  pid=%u  ppid=%u  session=%u  "
+                "dev=%u:%u  off=%llu  len=%llu  cmd=0x%x%s%s\n",
+                bold, event_name(e->type), reset, ac, action_name(e->action), reset,
+                e->pid, e->parent_pid, e->session_id, e->major, e->minor,
+                e->offset, e->length, e->command,
+                e->name[0] ? "  name=" : "", e->name[0] ? e->name : "");
+    }
+}
+
+static int stream_events(FILE *out, int color, unsigned int *exported)
 {
     int fd = open(EVENTS_PATH, O_RDONLY | O_CLOEXEC);
     struct dl_wire_event e;
     ssize_t n;
+    unsigned int count = 0;
     if (fd < 0) {
         perror(EVENTS_PATH);
         return 1;
@@ -213,26 +276,17 @@ static int show_events(void)
     while ((n = read(fd, &e, sizeof(e))) == (ssize_t)sizeof(e)) {
         if (e.magic != DL_EVENT_MAGIC || e.version != DL_EVENT_ABI_VERSION)
             continue;
-        {
-            char timestamp[48];
-            const char *ac = e.action == DL_WIRE_PASS ? C_GREEN :
-                             e.action == DL_WIRE_SIMULATE ? C_YELLOW : C_RED;
-            format_event_time(&e, timestamp, sizeof(timestamp));
-            printf("%s#%-5u%s  %s%s%s  %smono=+%llu.%03llus%s  "
-                   "s=%-3u %s%-16s%s pid=%-6u ppid=%-6u dev=%u:%u "
-                   "off=%llu len=%llu cmd=0x%x %s%-8s%s %s\n",
-                   clr(C_DIM), e.sequence, clr(C_RESET),
-                   clr(C_CYAN), timestamp, clr(C_RESET),
-                   clr(C_DIM), e.monotonic_ns / 1000000000ULL,
-                   (e.monotonic_ns / 1000000ULL) % 1000ULL, clr(C_RESET),
-                   e.session_id, clr(C_BOLD), event_name(e.type), clr(C_RESET),
-                   e.pid, e.parent_pid, e.major, e.minor,
-                   e.offset, e.length, e.command, clr(ac),
-                   action_name(e.action), clr(C_RESET), e.name);
-        }
+        print_event_record(out, &e, color);
+        count++;
     }
     close(fd);
+    if (exported) *exported = count;
     return n < 0 ? 1 : 0;
+}
+
+static int show_events(void)
+{
+    return stream_events(stdout, use_color, NULL);
 }
 
 static int run_shell(const char *script)
@@ -252,6 +306,46 @@ static int run_shell(const char *script)
         return 1;
     }
     return !(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+}
+
+static int export_events(void)
+{
+    const char *dir = "/data/adb/dynalab/logs";
+    char path[320];
+    time_t now = time(NULL);
+    struct tm tm;
+    FILE *out;
+    int fd;
+    unsigned int count = 0;
+
+    if (run_shell("mkdir -p '/data/adb/dynalab/logs' && chmod 700 '/data/adb/dynalab/logs'")) {
+        puts("Failed to create log directory.");
+        return 1;
+    }
+    if (!gmtime_r(&now, &tm)) return 1;
+    snprintf(path, sizeof(path),
+             "%s/dynalab-events-%04d%02d%02dT%02d%02d%02dZ-%d.log",
+             dir, tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+             tm.tm_hour, tm.tm_min, tm.tm_sec, (int)getpid());
+    fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (fd < 0) { perror(path); return 1; }
+    out = fdopen(fd, "w");
+    if (!out) { perror("fdopen"); close(fd); unlink(path); return 1; }
+
+    fprintf(out, "# KPMDynaLab Event Export\n");
+    fprintf(out, "# format=text-v1 rpc_api=%d event_abi=%d timezone=UTC\n",
+            DL_RPC_API_VERSION, DL_EVENT_ABI_VERSION);
+    fprintf(out, "# exported_utc=%04d-%02d-%02dT%02d:%02d:%02dZ\n",
+            tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+            tm.tm_hour, tm.tm_min, tm.tm_sec);
+    if (stream_events(out, 0, &count)) {
+        fclose(out); unlink(path); puts("Event export failed."); return 1;
+    }
+    fflush(out);
+    fsync(fileno(out));
+    fclose(out);
+    printf("Exported %u events: %s\n", count, path);
+    return 0;
 }
 
 static int blg_pack_present(void)
@@ -831,7 +925,8 @@ static void help(void)
     puts("  profile auto|trace|expert");
     puts("  seal                   activate selected profile");
     puts("  stop                   authenticated stop/reset");
-    puts("  events                 dump kernel event ring");
+    puts("  events | event         show recorded events");
+    puts("  export                 export events to /data/adb/dynalab/logs");
     puts("  blg status             show BLG state");
     puts("  blg setup              rebuild pack and prepare BLG");
     puts("  blg prepare            load/validate BLG if needed");
@@ -905,7 +1000,7 @@ int main(int argc, char **argv)
     }
 
     use_color = isatty(STDOUT_FILENO) && getenv("NO_COLOR") == NULL;
-    printf("%s%sKPMDynaLab%s %sv0.8.10.1-log-format-test%s\n",
+    printf("%s%sKPMDynaLab%s %sv0.8.10.2-log-export-test%s\n",
            clr(C_BOLD), clr(C_CYAN), clr(C_RESET), clr(C_DIM), clr(C_RESET));
     printf("%sKernel-assisted dynamic analysis laboratory%s\n\n",
            clr(C_DIM), clr(C_RESET));
@@ -975,6 +1070,8 @@ int main(int argc, char **argv)
             send_and_print("STOP");
         } else if (!strcmp(cmd, "events") || !strcmp(cmd, "event")) {
             show_events();
+        } else if (!strcmp(cmd, "export")) {
+            export_events();
         } else if (!strcmp(cmd, "blg") && arg) {
             if (!strcmp(arg, "status"))
                 blg_pack_status();
