@@ -12,7 +12,7 @@ Current test values:
 RPC API:   19
 Event ABI: 8
 KPM:       0.8.17-error-input-test
-CLI:       0.8.17-error-input-test
+CLI:       0.8.17.1-auto-unseal-test
 ```
 
 Before STATUS or LOGIN, CLI sends:

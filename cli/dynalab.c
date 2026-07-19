@@ -1143,6 +1143,20 @@ static int require_unsealed(const char *operation)
     return 1;
 }
 
+static int require_ready_for_run(void)
+{
+    char reply[256];
+    if (rpc("STATUS", reply, sizeof(reply)) < 0) return 0;
+    if (!strncmp(reply, "SEALED", 6)) {
+        fprintf(stderr, "%sOperation not permitted%s: a session is already SEALED.\n",
+                clr(C_RED), clr(C_RESET));
+        fprintf(stderr, "%sHint%s: wait for descendants or run 'unseal' first.\n",
+                clr(C_YELLOW), clr(C_RESET));
+        return 0;
+    }
+    return 1;
+}
+
 static int login(void)
 {
     char password[256];
@@ -1191,7 +1205,7 @@ int main(int argc, char **argv)
     }
 
     use_color = isatty(STDOUT_FILENO) && getenv("NO_COLOR") == NULL;
-    printf("%s%sKPMDynaLab%s %sv0.8.17-error-input-test%s\n",
+    printf("%s%sKPMDynaLab%s %sv0.8.17.1-auto-unseal-test%s\n",
            clr(C_BOLD), clr(C_CYAN), clr(C_RESET), clr(C_DIM), clr(C_RESET));
     printf("%sKernel-assisted dynamic analysis laboratory%s\n\n",
            clr(C_DIM), clr(C_RESET));
@@ -1334,6 +1348,8 @@ int main(int argc, char **argv)
                         run_argv[0], strerror(errno));
                 continue;
             }
+            if (!require_ready_for_run())
+                continue;
             run_start_sequence = latest_event_sequence();
             if (pipe(gate) < 0) {
                 perror("pipe");
@@ -1397,6 +1413,12 @@ int main(int argc, char **argv)
                 printf("%d descendant(s) still active; session remains SEALED.\n",
                        active);
                 printf("Artifacts preserved until descendants exit: %s\n", workdir);
+                puts("Hint: use 'session active'; unseal only after descendants finish.");
+                continue;
+            }
+
+            if (send_and_print("UNSEAL")) {
+                printf("Artifacts preserved because automatic unseal failed: %s\n", workdir);
                 continue;
             }
 
