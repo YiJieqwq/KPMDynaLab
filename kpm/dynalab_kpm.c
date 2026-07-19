@@ -66,7 +66,7 @@ extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
 #define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.8.15-command-semantics");
+KPM_VERSION("0.8.16-run-summary-test");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("YiJieqwq");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
@@ -160,6 +160,7 @@ struct dl_subject {
     int parent_pid;
     unsigned int session_id;
     unsigned int scope;
+    char pending_exec[64];
 };
 static struct dl_subject subjects[DL_MAX_SUBJECTS];
 static unsigned int session_counter;
@@ -936,7 +937,7 @@ static ssize_t control_write(struct file *file, const char __user *buf,
                       "ERR KPM_OLD" : "ERR CLI_OLD");
         } else {
             hello_tgid = current_id(1);
-            set_reply("OK HELLO 17 7 0.8.15-command-semantics");
+            set_reply("OK HELLO 18 7 0.8.16-run-summary-test");
         }
         return n;
     }
@@ -1268,10 +1269,27 @@ static void before_exec(hook_fargs5_t *args, void *udata)
     struct filename *filename = (struct filename *)args->arg1;
     int pid = current_id(0);
     struct dl_subject *s = find_subject(pid);
+    unsigned int i = 0;
+    const char *name;
     if (!s) return;
-    add_event_for(DL_WIRE_EXEC, DL_WIRE_PASS, pid, current_id(1),
-                  s->parent_pid, 0, 0, 0, 0, s->session_id, s->scope,
-                  filename ? filename->name : NULL);
+    name = filename ? filename->name : NULL;
+    while (name && name[i] && i < sizeof(s->pending_exec) - 1) {
+        s->pending_exec[i] = name[i];
+        i++;
+    }
+    s->pending_exec[i] = '\0';
+}
+
+static void after_exec(hook_fargs5_t *args, void *udata)
+{
+    int pid = current_id(0);
+    struct dl_subject *s = find_subject(pid);
+    if (!s) return;
+    if ((long)args->ret == 0)
+        add_event_for(DL_WIRE_EXEC, DL_WIRE_PASS, pid, current_id(1),
+                      s->parent_pid, 0, 0, 0, 0,
+                      s->session_id, s->scope, s->pending_exec);
+    s->pending_exec[0] = '\0';
 }
 
 static void before_exit(hook_fargs1_t *args, void *udata)
@@ -1527,6 +1545,24 @@ static int install_one(const char *name, int argc, void *before, void **saved)
     return 0;
 }
 
+static int install_both(const char *name, int argc, void *before,
+                        void *after, void **saved)
+{
+    void *addr = (void *)kp_lookup_name(name);
+    int err;
+    if (!addr) {
+        dl_log("ERROR: symbol not found: %s\n", name);
+        return -2;
+    }
+    err = hook_wrap(addr, argc, before, after, NULL);
+    if (err) {
+        dl_log("ERROR: hook failed: %s err=%d\n", name, err);
+        return -(int)err;
+    }
+    *saved = addr;
+    return 0;
+}
+
 static int install_optional(const char *name, int argc, void *before,
                             void **saved)
 {
@@ -1691,7 +1727,8 @@ static long dynalab_init(const char *args, const char *event, void *__user reser
     if (rc) goto fail;
     rc = install_one("wake_up_new_task", 1, before_fork, &sym_fork);
     if (rc) goto fail;
-    rc = install_one("do_execveat_common", 5, before_exec, &sym_exec);
+    rc = install_both("do_execveat_common", 5, before_exec, after_exec,
+                      &sym_exec);
     if (rc) goto fail;
     rc = install_one("do_exit", 1, before_exit, &sym_exit);
     if (rc) goto fail;

@@ -15,6 +15,7 @@
 #include <sys/wait.h>
 #include <termios.h>
 #include <time.h>
+#include <limits.h>
 #include <unistd.h>
 
 #include "../include/dl_rpc.h"
@@ -336,8 +337,18 @@ static void print_event_record(FILE *out, const struct dl_wire_event *e, int col
     }
 }
 
+struct dl_event_stats {
+    unsigned int records;
+    unsigned long long operations;
+    unsigned long long pass;
+    unsigned long long simulate;
+    unsigned long long suppress;
+    unsigned long long unknown;
+};
+
 static int stream_events(FILE *out, int color, unsigned int *exported,
-                         unsigned int after_sequence)
+                         unsigned int after_sequence,
+                         struct dl_event_stats *stats)
 {
     int fd = open(EVENTS_PATH, O_RDONLY | O_CLOEXEC);
     struct dl_wire_event e;
@@ -354,6 +365,16 @@ static int stream_events(FILE *out, int color, unsigned int *exported,
             continue;
         print_event_record(out, &e, color);
         count++;
+        if (stats) {
+            unsigned long long weight =
+                e.type == DL_WIRE_FILE_WRITE_SUMMARY && e.command ? e.command : 1;
+            stats->records++;
+            stats->operations += weight;
+            if (e.action == DL_WIRE_PASS) stats->pass += weight;
+            else if (e.action == DL_WIRE_SIMULATE) stats->simulate += weight;
+            else if (e.action == DL_WIRE_SUPPRESS) stats->suppress += weight;
+            else stats->unknown += weight;
+        }
     }
     close(fd);
     if (exported) *exported = count;
@@ -362,12 +383,25 @@ static int stream_events(FILE *out, int color, unsigned int *exported,
 
 static int show_events(void)
 {
-    return stream_events(stdout, use_color, NULL, 0);
+    return stream_events(stdout, use_color, NULL, 0, NULL);
 }
 
 static int show_events_since(unsigned int sequence)
 {
-    return stream_events(stdout, use_color, NULL, sequence);
+    struct dl_event_stats stats = {0};
+    int rc = stream_events(stdout, use_color, NULL, sequence, &stats);
+    if (!rc) {
+        printf("%sSummary%s  operations=%llu  records=%u  "
+               "%sPASS=%llu%s  %sSIMULATE=%llu%s  %sSUPPRESS=%llu%s",
+               clr(C_BOLD), clr(C_RESET), stats.operations, stats.records,
+               clr(C_GREEN), stats.pass, clr(C_RESET),
+               clr(C_YELLOW), stats.simulate, clr(C_RESET),
+               clr(C_RED), stats.suppress, clr(C_RESET));
+        if (stats.unknown)
+            printf("  UNKNOWN=%llu", stats.unknown);
+        putchar('\n');
+    }
+    return rc;
 }
 
 static unsigned int latest_event_sequence(void)
@@ -383,6 +417,31 @@ static unsigned int latest_event_sequence(void)
             latest = e.sequence;
     close(fd);
     return latest;
+}
+
+static int target_is_executable(const char *program)
+{
+    struct stat st;
+    const char *path_env;
+    char paths[2048], candidate[PATH_MAX];
+    char *dir, *save = NULL;
+
+    if (!program || !*program) { errno = EINVAL; return 0; }
+    if (strchr(program, '/')) {
+        if (stat(program, &st) < 0) return 0;
+        if (!S_ISREG(st.st_mode)) { errno = EACCES; return 0; }
+        return access(program, X_OK) == 0;
+    }
+    path_env = getenv("PATH");
+    if (!path_env || !*path_env) path_env = "/system/bin:/system/xbin:/vendor/bin";
+    snprintf(paths, sizeof(paths), "%s", path_env);
+    for (dir = strtok_r(paths, ":", &save); dir; dir = strtok_r(NULL, ":", &save)) {
+        snprintf(candidate, sizeof(candidate), "%s/%s", *dir ? dir : ".", program);
+        if (!stat(candidate, &st) && S_ISREG(st.st_mode) && !access(candidate, X_OK))
+            return 1;
+    }
+    errno = ENOENT;
+    return 0;
 }
 
 static int run_shell(const char *script)
@@ -434,7 +493,7 @@ static int export_events(void)
     fprintf(out, "# exported_utc=%04d-%02d-%02dT%02d:%02d:%02dZ\n",
             tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
             tm.tm_hour, tm.tm_min, tm.tm_sec);
-    if (stream_events(out, 0, &count, 0)) {
+    if (stream_events(out, 0, &count, 0, NULL)) {
         fclose(out); unlink(path); puts("Event export failed."); return 1;
     }
     fflush(out);
@@ -1107,7 +1166,7 @@ int main(int argc, char **argv)
     }
 
     use_color = isatty(STDOUT_FILENO) && getenv("NO_COLOR") == NULL;
-    printf("%s%sKPMDynaLab%s %sv0.8.15-command-semantics%s\n",
+    printf("%s%sKPMDynaLab%s %sv0.8.16-run-summary-test%s\n",
            clr(C_BOLD), clr(C_CYAN), clr(C_RESET), clr(C_DIM), clr(C_RESET));
     printf("%sKernel-assisted dynamic analysis laboratory%s\n\n",
            clr(C_DIM), clr(C_RESET));
@@ -1241,6 +1300,11 @@ int main(int argc, char **argv)
             run_argv[n] = NULL;
             if (!n)
                 continue;
+            if (!target_is_executable(run_argv[0])) {
+                fprintf(stderr, "Target preflight failed: %s: %s\n",
+                        run_argv[0], strerror(errno));
+                continue;
+            }
             run_start_sequence = latest_event_sequence();
             if (pipe(gate) < 0) {
                 perror("pipe");
