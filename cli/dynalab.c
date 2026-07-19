@@ -329,7 +329,8 @@ static void print_event_record(FILE *out, const struct dl_wire_event *e, int col
     }
 }
 
-static int stream_events(FILE *out, int color, unsigned int *exported)
+static int stream_events(FILE *out, int color, unsigned int *exported,
+                         unsigned int after_sequence)
 {
     int fd = open(EVENTS_PATH, O_RDONLY | O_CLOEXEC);
     struct dl_wire_event e;
@@ -342,6 +343,8 @@ static int stream_events(FILE *out, int color, unsigned int *exported)
     while ((n = read(fd, &e, sizeof(e))) == (ssize_t)sizeof(e)) {
         if (e.magic != DL_EVENT_MAGIC || e.version != DL_EVENT_ABI_VERSION)
             continue;
+        if (e.sequence <= after_sequence)
+            continue;
         print_event_record(out, &e, color);
         count++;
     }
@@ -352,7 +355,27 @@ static int stream_events(FILE *out, int color, unsigned int *exported)
 
 static int show_events(void)
 {
-    return stream_events(stdout, use_color, NULL);
+    return stream_events(stdout, use_color, NULL, 0);
+}
+
+static int show_events_since(unsigned int sequence)
+{
+    return stream_events(stdout, use_color, NULL, sequence);
+}
+
+static unsigned int latest_event_sequence(void)
+{
+    int fd = open(EVENTS_PATH, O_RDONLY | O_CLOEXEC);
+    struct dl_wire_event e;
+    ssize_t n;
+    unsigned int latest = 0;
+    if (fd < 0) return 0;
+    while ((n = read(fd, &e, sizeof(e))) == (ssize_t)sizeof(e))
+        if (e.magic == DL_EVENT_MAGIC && e.version == DL_EVENT_ABI_VERSION &&
+            e.sequence > latest)
+            latest = e.sequence;
+    close(fd);
+    return latest;
 }
 
 static int run_shell(const char *script)
@@ -404,7 +427,7 @@ static int export_events(void)
     fprintf(out, "# exported_utc=%04d-%02d-%02dT%02d:%02d:%02dZ\n",
             tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
             tm.tm_hour, tm.tm_min, tm.tm_sec);
-    if (stream_events(out, 0, &count)) {
+    if (stream_events(out, 0, &count, 0)) {
         fclose(out); unlink(path); puts("Event export failed."); return 1;
     }
     fflush(out);
@@ -1066,7 +1089,7 @@ int main(int argc, char **argv)
     }
 
     use_color = isatty(STDOUT_FILENO) && getenv("NO_COLOR") == NULL;
-    printf("%s%sKPMDynaLab%s %sv0.8.13-session-block-test%s\n",
+    printf("%s%sKPMDynaLab%s %sv0.8.13.1-run-log-scope-test%s\n",
            clr(C_BOLD), clr(C_CYAN), clr(C_RESET), clr(C_DIM), clr(C_RESET));
     printf("%sKernel-assisted dynamic analysis laboratory%s\n\n",
            clr(C_DIM), clr(C_RESET));
@@ -1180,6 +1203,7 @@ int main(int argc, char **argv)
             pid_t pid;
             char *run_argv[64];
             int n = 0, status, gate[2], active = 0;
+            unsigned int run_start_sequence;
             char *tok;
             char target_cmd[64], workdir[128], answer[16];
 
@@ -1191,6 +1215,7 @@ int main(int argc, char **argv)
             run_argv[n] = NULL;
             if (!n)
                 continue;
+            run_start_sequence = latest_event_sequence();
             if (pipe(gate) < 0) {
                 perror("pipe");
                 continue;
@@ -1243,7 +1268,7 @@ int main(int argc, char **argv)
                 printf("Target killed: signal=%d\n", WTERMSIG(status));
             else
                 printf("Target state: raw_status=%d\n", status);
-            show_events();
+            show_events_since(run_start_sequence);
 
             if (!rpc("ACTIVE", reply, sizeof(reply)))
                 sscanf(reply, "ACTIVE %d", &active);

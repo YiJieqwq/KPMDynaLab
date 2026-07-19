@@ -12,7 +12,7 @@ Current test values:
 RPC API:   14
 Event ABI: 6
 KPM:       0.8.13-session-block-test
-CLI:       0.8.13-session-block-test
+CLI:       0.8.13.1-run-log-scope-test
 ```
 
 Before STATUS or LOGIN, CLI sends:
