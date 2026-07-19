@@ -66,7 +66,7 @@ extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
 #define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.8.11-event-context-test");
+KPM_VERSION("0.8.12-lifecycle-events-test");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("YiJieqwq");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
@@ -839,7 +839,7 @@ static ssize_t control_write(struct file *file, const char __user *buf,
                       "ERR KPM_OLD" : "ERR CLI_OLD");
         } else {
             hello_tgid = current_id(1);
-            set_reply("OK HELLO 12 5 0.8.11-event-context-test");
+            set_reply("OK HELLO 13 6 0.8.12-lifecycle-events-test");
         }
         return n;
     }
@@ -868,6 +868,9 @@ static ssize_t control_write(struct file *file, const char __user *buf,
             set_reply("ERR UNINITIALIZED");
         } else if (!parse_hex64(cmd + 6, &value) && value == login_verifier) {
             authenticated_tgid = current_id(1);
+            add_event_for(DL_WIRE_CLI_LOGIN, DL_WIRE_PASS,
+                          current_id(0), current_id(1), 0, 0, 0, 0, 0,
+                          0, DL_SCOPE_GLOBAL, "CLI_LOGIN");
             set_reply("OK LOGIN");
         } else {
             set_reply("ERR AUTH");
@@ -1051,6 +1054,9 @@ static ssize_t control_write(struct file *file, const char __user *buf,
         event_head = 0;
         set_reply("OK CLEAR");
     } else if (streq(cmd, "LOGOUT")) {
+        add_event_for(DL_WIRE_CLI_LOGOUT, DL_WIRE_PASS,
+                      current_id(0), current_id(1), 0, 0, 0, 0, 0,
+                      0, DL_SCOPE_GLOBAL, "CLI_LOGOUT");
         authenticated_tgid = -1;
         hello_tgid = -1;
         set_reply("OK LOGOUT");
@@ -1573,6 +1579,9 @@ static long dynalab_init(const char *args, const char *event, void *__user reser
     rc = init_procfs();
     if (rc) goto fail;
 
+    add_event_for(DL_WIRE_KPM_LOAD, DL_WIRE_PASS,
+                  0, 0, 0, 0, 0, 0, 0,
+                  0, DL_SCOPE_GLOBAL, "KPM_LOAD");
     dl_log("loaded: /proc/dynalab/control + events\n");
     return 0;
 fail:

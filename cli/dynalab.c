@@ -172,6 +172,9 @@ static const char *event_name(unsigned int type)
     case DL_WIRE_FILE_UNLINK: return "FILE_UNLINK";
     case DL_WIRE_FILE_TRUNCATE: return "FILE_TRUNCATE";
     case DL_WIRE_GESTURE: return "GESTURE";
+    case DL_WIRE_KPM_LOAD: return "KPM_LOAD";
+    case DL_WIRE_CLI_LOGIN: return "CLI_LOGIN";
+    case DL_WIRE_CLI_LOGOUT: return "CLI_LOGOUT";
     default: return "UNKNOWN";
     }
 }
@@ -286,6 +289,13 @@ static void print_event_record(FILE *out, const struct dl_wire_event *e, int col
         fprintf(out, "%sGESTURE%s  result=%s%s%s  %s%s%s  cmd=0x%x  scope=global\n",
                 bold, reset, bold, e->name[0] ? e->name : "UNKNOWN", reset,
                 ac, action_name(e->action), reset, e->command);
+    } else if (e->type == DL_WIRE_KPM_LOAD) {
+        fprintf(out, "%sKPM_LOAD%s  %s%s%s  component=KPMDynaLab\n",
+                bold, reset, ac, action_name(e->action), reset);
+    } else if (e->type == DL_WIRE_CLI_LOGIN || e->type == DL_WIRE_CLI_LOGOUT) {
+        fprintf(out, "%s%s%s  %s%s%s  pid=%u  scope=global\n",
+                bold, event_name(e->type), reset,
+                ac, action_name(e->action), reset, e->pid);
     } else if (e->type == DL_WIRE_BLOCK_WRITE ||
                e->type == DL_WIRE_BLOCK_IOCTL ||
                e->type == DL_WIRE_BLOCK_FALLOCATE) {
@@ -1056,7 +1066,7 @@ int main(int argc, char **argv)
     }
 
     use_color = isatty(STDOUT_FILENO) && getenv("NO_COLOR") == NULL;
-    printf("%s%sKPMDynaLab%s %sv0.8.11-event-context-test%s\n",
+    printf("%s%sKPMDynaLab%s %sv0.8.12-lifecycle-events-test%s\n",
            clr(C_BOLD), clr(C_CYAN), clr(C_RESET), clr(C_DIM), clr(C_RESET));
     printf("%sKernel-assisted dynamic analysis laboratory%s\n\n",
            clr(C_DIM), clr(C_RESET));
