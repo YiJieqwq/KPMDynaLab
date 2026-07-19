@@ -66,7 +66,7 @@ extern int (*kp_printk)(const char *fmt, ...) __asm__("printk");
 #define dl_log(fmt, ...) kp_printk("[dynalab] " fmt, ##__VA_ARGS__)
 
 KPM_NAME("KPMDynaLab");
-KPM_VERSION("0.8.13-session-block-test");
+KPM_VERSION("0.8.14-file-coverage-test");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("YiJieqwq");
 KPM_DESCRIPTION("Android block-device dynamic analysis prototype");
@@ -79,6 +79,7 @@ static int state = DL_READY;
 static void *sym_write_iter, *sym_ioctl, *sym_fallocate, *sym_reboot;
 static void *sym_fork, *sym_exec, *sym_exit;
 static void *sym_vfs_create, *sym_vfs_mkdir, *sym_vfs_write;
+static void *sym_f2fs_write_iter, *sym_ext4_write_iter;
 static void *sym_do_filp_open;
 static void *sym_do_mkdirat;
 static void *sym_notify_change, *sym_vfs_unlink, *sym_vfs_truncate;
@@ -846,7 +847,7 @@ static ssize_t control_write(struct file *file, const char __user *buf,
                       "ERR KPM_OLD" : "ERR CLI_OLD");
         } else {
             hello_tgid = current_id(1);
-            set_reply("OK HELLO 14 6 0.8.13-session-block-test");
+            set_reply("OK HELLO 15 6 0.8.14-file-coverage-test");
         }
         return n;
     }
@@ -1264,6 +1265,25 @@ static void before_vfs_write(hook_fargs4_t *args, void *udata)
                   dentry_leaf(file->f_path.dentry));
 }
 
+static void before_file_write_iter(hook_fargs2_t *args, void *udata)
+{
+    int pid = current_id(0);
+    struct dl_subject *s = find_subject(pid);
+    struct kiocb *iocb = (struct kiocb *)args->arg0;
+    struct iov_iter *from = (struct iov_iter *)args->arg1;
+    struct file *file;
+    struct inode *inode;
+    if (!s || !iocb || !from) return;
+    file = iocb->ki_filp;
+    if (!file) return;
+    inode = file_inode(file);
+    if (!inode || !S_ISREG(inode->i_mode)) return;
+    add_event_for(DL_WIRE_FILE_WRITE, DL_WIRE_PASS, pid, current_id(1),
+                  s->parent_pid, 0, iocb->ki_pos, iov_iter_count(from), 1,
+                  s->session_id, s->scope,
+                  dentry_leaf(file->f_path.dentry));
+}
+
 static void before_notify_change(hook_fargs4_t *args, void *udata)
 {
     int pid = current_id(0);
@@ -1414,6 +1434,21 @@ static int install_one(const char *name, int argc, void *before, void **saved)
     err = hook_wrap(addr, argc, before, NULL, NULL);
     if (err) {
         dl_log("ERROR: hook failed: %s err=%d\n", name, err);
+        return -(int)err;
+    }
+    *saved = addr;
+    return 0;
+}
+
+static int install_optional(const char *name, int argc, void *before,
+                            void **saved)
+{
+    void *addr = (void *)kp_lookup_name(name);
+    int err;
+    if (!addr) return 0;
+    err = hook_wrap(addr, argc, before, NULL, NULL);
+    if (err) {
+        dl_log("ERROR: optional hook failed: %s err=%d\n", name, err);
         return -(int)err;
     }
     *saved = addr;
@@ -1578,8 +1613,16 @@ static long dynalab_init(const char *args, const char *event, void *__user reser
     rc = install_one_after("do_mkdirat", 3, after_do_mkdirat,
                            &sym_do_mkdirat);
     if (rc) goto fail;
-    rc = install_one("vfs_write", 4, before_vfs_write, &sym_vfs_write);
+    rc = install_optional("f2fs_file_write_iter", 2, before_file_write_iter,
+                          &sym_f2fs_write_iter);
     if (rc) goto fail;
+    rc = install_optional("ext4_file_write_iter", 2, before_file_write_iter,
+                          &sym_ext4_write_iter);
+    if (rc) goto fail;
+    if (!sym_f2fs_write_iter && !sym_ext4_write_iter) {
+        rc = install_one("vfs_write", 4, before_vfs_write, &sym_vfs_write);
+        if (rc) goto fail;
+    }
     /* Remaining file hooks stay staged after the v0.6.0 unlink panic. */
     rc = install_one("blkdev_write_iter", 2, before_blkdev_write_iter, &sym_write_iter);
     if (rc) goto fail;
@@ -1609,6 +1652,8 @@ fail:
     if (sym_vfs_unlink) unhook(sym_vfs_unlink);
     if (sym_notify_change) unhook(sym_notify_change);
     if (sym_vfs_write) unhook(sym_vfs_write);
+    if (sym_f2fs_write_iter) unhook(sym_f2fs_write_iter);
+    if (sym_ext4_write_iter) unhook(sym_ext4_write_iter);
     if (sym_vfs_mkdir) unhook(sym_vfs_mkdir);
     if (sym_vfs_create) unhook(sym_vfs_create);
     if (sym_exit) unhook(sym_exit);
@@ -1707,6 +1752,8 @@ static long dynalab_exit(void *__user reserved)
     if (sym_vfs_unlink) unhook(sym_vfs_unlink);
     if (sym_notify_change) unhook(sym_notify_change);
     if (sym_vfs_write) unhook(sym_vfs_write);
+    if (sym_f2fs_write_iter) unhook(sym_f2fs_write_iter);
+    if (sym_ext4_write_iter) unhook(sym_ext4_write_iter);
     if (sym_vfs_mkdir) unhook(sym_vfs_mkdir);
     if (sym_vfs_create) unhook(sym_vfs_create);
     if (sym_exit) unhook(sym_exit);
