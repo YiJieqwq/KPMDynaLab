@@ -13,7 +13,7 @@ KDIR ?=
 BUILD := build
 POLICY_TEST := $(BUILD)/policy_test
 
-.PHONY: all test kpm cli clean
+.PHONY: all test kpm cli async-probe clean
 
 all: test
 
@@ -36,6 +36,15 @@ cli: $(CLI_OUT)
 $(CLI_OUT): cli/dynalab.c include/dl_rpc.h | $(BUILD)
 	$(CLI_CC) -std=c11 -Wall -Wextra -Werror -O2 -static \
 		-Iinclude cli/dynalab.c -o $@
+
+ASYNC_PROBE_OUT := $(BUILD)/dynalab-async-probe-arm64
+
+async-probe: $(ASYNC_PROBE_OUT)
+	@file $(ASYNC_PROBE_OUT)
+	@echo "Built: $(ASYNC_PROBE_OUT)"
+
+$(ASYNC_PROBE_OUT): tests/async_provenance_probe.c | $(BUILD)
+	$(CLI_CC) -std=c11 -Wall -Wextra -Werror -O2 -static $< -o $@
 
 # Build the device-test KPM against Android 16 / Linux 6.12 headers.
 KPM_SRC := kpm/dynalab_kpm.c
