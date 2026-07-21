@@ -38,6 +38,32 @@ dynalab-async-probe-0.1.0-arm64
 SHA-256: f3c1253b69c237c74aa21ae0f9c41dfac3eb31fff0da105a8fb62bf926abf2de
 ```
 
+## Automated bootstrap
+
+On a fresh Ubuntu/Debian-like workspace, use:
+
+```sh
+git clone https://github.com/YiJieqwq/KPMDynaLab.git /workspace/KPMDynaLab
+bash /workspace/KPMDynaLab/scripts/bootstrap_workspace.sh /workspace
+```
+
+The script installs the cross-build dependencies, clones the pinned kernel tag, prepares GKI arm64 headers, and builds policy tests, CLI, async probe and KPM.
+
+Pinned kernel source:
+
+```text
+repository: https://android.googlesource.com/kernel/common
+tag:        android16-6.12-2025-06_r1
+commit:     2d954fcf3d1b73a41d0fa498324da357ec96cbdf
+```
+
+After migration, verify with:
+
+```sh
+bash /workspace/KPMDynaLab/scripts/verify_dev_environment.sh \
+  /workspace/KPMDynaLab /workspace/android16-6.12
+```
+
 ## Build environment used
 
 ```text
