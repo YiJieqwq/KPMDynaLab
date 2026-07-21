@@ -24,7 +24,7 @@ install_deps() {
         ca-certificates git make gcc gcc-aarch64-linux-gnu \
         libc6-dev-arm64-cross binutils-aarch64-linux-gnu \
         python3 curl file bc bison flex libssl-dev libelf-dev \
-        dwarves rsync xz-utils
+        dwarves libdw-dev rsync xz-utils
 }
 
 mkdir -p "$ROOT"
